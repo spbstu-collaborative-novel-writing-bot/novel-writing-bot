@@ -1,0 +1,29 @@
+= Collaborative Novel Writing Bot HTTP API
+:doctype: book
+:toc: left
+:source-highlighter: highlightjs
+
+== GET /healthcheck
+
+Публичный endpoint проверки состояния приложения.
+
+include::{snippets}/healthcheck/http-request.adoc[]
+include::{snippets}/healthcheck/http-response.adoc[]
+include::{snippets}/healthcheck/response-fields.adoc[]
+
+== GET /users
+
+Административный endpoint со списком зарегистрированных пользователей. Требует заголовок `X-Admin-Token`.
+
+=== Успешный запрос
+
+include::{snippets}/users-success/http-request.adoc[]
+include::{snippets}/users-success/request-headers.adoc[]
+include::{snippets}/users-success/http-response.adoc[]
+include::{snippets}/users-success/response-fields.adoc[]
+
+=== Ошибка доступа
+
+include::{snippets}/users-forbidden/http-request.adoc[]
+include::{snippets}/users-forbidden/http-response.adoc[]
+include::{snippets}/users-forbidden/response-fields.adoc[]

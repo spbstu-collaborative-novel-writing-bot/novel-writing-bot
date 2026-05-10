@@ -1,0 +1,47 @@
+services:
+  app:
+    build: .
+    image: novel-writing-bot:latest
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-novelbot}
+      POSTGRES_USER: ${POSTGRES_USER:-novelbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-novelbot}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-novelbot} -d ${POSTGRES_DB:-novelbot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-novelbot}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-novelbot}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
