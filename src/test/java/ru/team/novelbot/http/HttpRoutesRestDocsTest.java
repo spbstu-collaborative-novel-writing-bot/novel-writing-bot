@@ -1,20 +1,35 @@
 package ru.team.novelbot.http;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.restdocs.RestDocumentationContextProvider;
 import org.springframework.restdocs.RestDocumentationExtension;
 import org.springframework.test.web.reactive.server.WebTestClient;
+import org.springframework.transaction.support.TransactionTemplate;
 import ru.team.novelbot.config.AppProperties;
 import ru.team.novelbot.db.DatabaseInitializer;
+import ru.team.novelbot.repository.ChapterRepository;
+import ru.team.novelbot.repository.NovelRepository;
 import ru.team.novelbot.repository.UserRepository;
+import ru.team.novelbot.service.AccessControlService;
+import ru.team.novelbot.service.ChapterService;
+import ru.team.novelbot.service.NovelService;
 import ru.team.novelbot.service.UserAuthService;
+import ru.team.novelbot.telegram.MiniAppAuthService;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import javax.sql.DataSource;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.springframework.restdocs.headers.HeaderDocumentation.headerWithName;
@@ -23,20 +38,48 @@ import static org.springframework.restdocs.payload.PayloadDocumentation.fieldWit
 import static org.springframework.restdocs.payload.PayloadDocumentation.responseFields;
 import static org.springframework.restdocs.webtestclient.WebTestClientRestDocumentation.document;
 import static org.springframework.restdocs.webtestclient.WebTestClientRestDocumentation.documentationConfiguration;
+import static org.assertj.core.api.Assertions.assertThat;
 
 @ExtendWith(RestDocumentationExtension.class)
 class HttpRoutesRestDocsTest {
     private WebTestClient webTestClient;
     private UserAuthService userAuthService;
+    private NovelService novelService;
+    private ChapterService chapterService;
+    private AppProperties properties;
 
     @BeforeEach
     void setUp(RestDocumentationContextProvider restDocumentation) {
         DataSource dataSource = dataSource();
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
         new DatabaseInitializer(jdbcTemplate).initialize();
-        AppProperties properties = testProperties();
-        userAuthService = new UserAuthService(new UserRepository(jdbcTemplate), properties);
-        HttpRoutes routes = new HttpRoutes(properties, userAuthService);
+        properties = testProperties();
+        ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
+        UserRepository userRepository = new UserRepository(jdbcTemplate);
+        NovelRepository novelRepository = new NovelRepository(jdbcTemplate);
+        ChapterRepository chapterRepository = new ChapterRepository(jdbcTemplate);
+        AccessControlService accessControlService = new AccessControlService(novelRepository);
+        userAuthService = new UserAuthService(userRepository, properties);
+        chapterService = new ChapterService(
+                chapterRepository,
+                novelRepository,
+                accessControlService,
+                new TransactionTemplate(new DataSourceTransactionManager(dataSource))
+        );
+        novelService = new NovelService(
+                novelRepository,
+                chapterRepository,
+                userAuthService,
+                accessControlService,
+                new TransactionTemplate(new DataSourceTransactionManager(dataSource))
+        );
+        HttpRoutes routes = new HttpRoutes(
+                properties,
+                userAuthService,
+                chapterService,
+                new MiniAppAuthService(properties, objectMapper),
+                objectMapper
+        );
         webTestClient = WebTestClient.bindToRouterFunction(routes.routes())
                 .configureClient()
                 .filter(documentationConfiguration(restDocumentation))
@@ -96,6 +139,57 @@ class HttpRoutesRestDocsTest {
                 ));
     }
 
+    @Test
+    void servesMiniAppEditorHtml() {
+        webTestClient.get()
+                .uri("/mini/chapter-editor")
+                .exchange()
+                .expectStatus().isOk()
+                .expectHeader().contentTypeCompatibleWith("text/html");
+    }
+
+    @Test
+    void rejectsMiniApiWithoutTelegramInitData() {
+        webTestClient.get()
+                .uri("/mini/api/chapters/1/1")
+                .exchange()
+                .expectStatus().isForbidden();
+    }
+
+    @Test
+    void miniApiLoadsAndSavesChapterWithValidInitData() throws Exception {
+        userAuthService.registerOrUpdate(100, "owner", "Owner");
+        var novel = novelService.createNovel(100, "City", "Story", "fantasy");
+        var chapter = chapterService.addChapter(100, novel.id(), "Start", "Original text");
+        String initData = signedInitData(100);
+
+        String loaded = webTestClient.get()
+                .uri("/mini/api/chapters/{novelId}/{chapterId}", novel.id(), chapter.id())
+                .header("X-Telegram-Init-Data", initData)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class)
+                .returnResult()
+                .getResponseBody();
+        assertThat(loaded).contains("\"title\":\"Start\"");
+
+        String saved = webTestClient.put()
+                .uri("/mini/api/chapters/{novelId}/{chapterId}", novel.id(), chapter.id())
+                .header("X-Telegram-Init-Data", initData)
+                .bodyValue(Map.of(
+                        "title", "Renamed",
+                        "text", "Updated text",
+                        "updated_at", chapter.updatedAt().toString()
+                ))
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class)
+                .returnResult()
+                .getResponseBody();
+        assertThat(saved).contains("\"title\":\"Renamed\"");
+        assertThat(saved).contains("\"text\":\"Updated text\"");
+    }
+
     private DataSource dataSource() {
         DriverManagerDataSource dataSource = new DriverManagerDataSource();
         dataSource.setDriverClassName("org.h2.Driver");
@@ -109,13 +203,35 @@ class HttpRoutesRestDocsTest {
     private AppProperties testProperties() {
         return new AppProperties(
                 "telegram-token",
+                "",
                 Set.of(100L),
                 "secret",
                 8080,
                 new AppProperties.Database("localhost", 5432, "novelbot", "user", "password"),
                 new AppProperties.Rabbit("localhost", 5672, "guest", "guest", "llm.requests"),
-                new AppProperties.Llm("llm-key", "http://localhost/llm", "test-model"),
+                new AppProperties.Llm("OPENAI_COMPATIBLE", "llm-key", "http://localhost/llm", "test-model", "", "GIGACHAT_API_PERS", "http://localhost/oauth"),
                 List.of("Гвоздева Е.", "Крутиков Д.", "Михайлова А.", "Романова А.")
         );
+    }
+
+    private String signedInitData(long chatId) throws Exception {
+        String user = "{\"id\":" + chatId + ",\"first_name\":\"Owner\"}";
+        String authDate = "1710000000";
+        String queryId = "test-query";
+        String dataCheckString = "auth_date=" + authDate + "\n"
+                + "query_id=" + queryId + "\n"
+                + "user=" + user;
+        byte[] secret = hmac("WebAppData".getBytes(StandardCharsets.UTF_8), properties.telegramBotToken().getBytes(StandardCharsets.UTF_8));
+        String hash = HexFormat.of().formatHex(hmac(secret, dataCheckString.getBytes(StandardCharsets.UTF_8)));
+        return "auth_date=" + authDate
+                + "&query_id=" + queryId
+                + "&user=" + URLEncoder.encode(user, StandardCharsets.UTF_8)
+                + "&hash=" + hash;
+    }
+
+    private byte[] hmac(byte[] key, byte[] value) throws Exception {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(key, "HmacSHA256"));
+        return mac.doFinal(value);
     }
 }

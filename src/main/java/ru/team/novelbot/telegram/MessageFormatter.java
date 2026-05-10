@@ -13,7 +13,7 @@ public final class MessageFormatter {
             return text;
         }
         return text.substring(0, TELEGRAM_SAFE_LIMIT - 80)
-                + "\n\nТекст был сокращен, потому что он слишком длинный для одного сообщения Telegram.";
+                + "\n\nТекст был сокращён, потому что он слишком длинный для одного сообщения Telegram.";
     }
 
     public static String excerpt(String text, int maxLength) {

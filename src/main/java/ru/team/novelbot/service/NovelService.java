@@ -7,7 +7,9 @@ import ru.team.novelbot.domain.AuthorType;
 import ru.team.novelbot.domain.Novel;
 import ru.team.novelbot.domain.NovelAuthor;
 import ru.team.novelbot.domain.NovelDetails;
+import ru.team.novelbot.domain.NovelStats;
 import ru.team.novelbot.domain.NovelSummary;
+import ru.team.novelbot.repository.ChapterRepository;
 import ru.team.novelbot.repository.NovelRepository;
 
 import java.util.List;
@@ -15,17 +17,20 @@ import java.util.List;
 @Service
 public class NovelService {
     private final NovelRepository novelRepository;
+    private final ChapterRepository chapterRepository;
     private final UserAuthService userAuthService;
     private final AccessControlService accessControlService;
     private final TransactionTemplate transactionTemplate;
 
     public NovelService(
             NovelRepository novelRepository,
+            ChapterRepository chapterRepository,
             UserAuthService userAuthService,
             AccessControlService accessControlService,
             TransactionTemplate transactionTemplate
     ) {
         this.novelRepository = novelRepository;
+        this.chapterRepository = chapterRepository;
         this.userAuthService = userAuthService;
         this.accessControlService = accessControlService;
         this.transactionTemplate = transactionTemplate;
@@ -51,8 +56,12 @@ public class NovelService {
                 .orElseThrow(() -> new AppException("Произведение не найдено."));
         AppUser owner = userAuthService.requireUser(novel.ownerChatId());
         List<NovelAuthor> authors = novelRepository.findAuthors(novelId);
-        int chapterCount = novelRepository.countChapters(novelId);
-        return new NovelDetails(novel, owner, authors, chapterCount);
+        return new NovelDetails(novel, owner, authors, stats(novelId));
+    }
+
+    public NovelStats stats(long chatId, long novelId) {
+        accessControlService.requireAccess(novelId, chatId);
+        return stats(novelId);
     }
 
     public void deleteNovel(long chatId, long novelId) {
@@ -90,5 +99,12 @@ public class NovelService {
         accessControlService.requireAccess(novelId, chatId);
         return novelRepository.findById(novelId)
                 .orElseThrow(() -> new AppException("Произведение не найдено."));
+    }
+
+    private NovelStats stats(long novelId) {
+        var chapters = chapterRepository.findByNovelId(novelId);
+        int wordCount = chapters.stream().mapToInt(chapter -> TextTools.wordCount(chapter.text())).sum();
+        int characterCount = chapters.stream().mapToInt(chapter -> chapter.text().length()).sum();
+        return new NovelStats(chapters.size(), wordCount, characterCount);
     }
 }

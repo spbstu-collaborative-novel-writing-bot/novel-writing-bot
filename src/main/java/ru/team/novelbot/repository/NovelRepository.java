@@ -53,17 +53,23 @@ public class NovelRepository {
     public List<NovelSummary> findAccessibleByChatId(long chatId) {
         return jdbcTemplate.query(
                 """
-                SELECT n.id, n.title, n.genre, a.author_type
+                SELECT n.id, n.title, n.genre, a.author_type, n.created_at, n.updated_at,
+                       COUNT(c.id) AS chapter_count
                 FROM novels n
                 JOIN novel_authors a ON a.novel_id = n.id
+                LEFT JOIN chapters c ON c.novel_id = n.id
                 WHERE a.chat_id = ?
+                GROUP BY n.id, n.title, n.genre, a.author_type, n.created_at, n.updated_at
                 ORDER BY n.updated_at DESC, n.id DESC
                 """,
                 (rs, rowNum) -> new NovelSummary(
                         rs.getLong("id"),
                         rs.getString("title"),
                         rs.getString("genre"),
-                        AuthorType.valueOf(rs.getString("author_type"))
+                        AuthorType.valueOf(rs.getString("author_type")),
+                        rs.getInt("chapter_count"),
+                        rs.getTimestamp("created_at").toLocalDateTime(),
+                        rs.getTimestamp("updated_at").toLocalDateTime()
                 ),
                 chatId
         );

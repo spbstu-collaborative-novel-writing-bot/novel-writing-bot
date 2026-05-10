@@ -13,6 +13,9 @@ public record LlmRequest(
         String result,
         String errorMessage,
         LocalDateTime createdAt,
-        LocalDateTime updatedAt
+        LocalDateTime updatedAt,
+        String provider,
+        String model,
+        LocalDateTime completedAt
 ) {
 }

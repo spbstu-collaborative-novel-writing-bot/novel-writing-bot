@@ -9,6 +9,8 @@ import ru.team.novelbot.domain.Chapter;
 import ru.team.novelbot.domain.ChapterHistory;
 
 import java.sql.PreparedStatement;
+import java.sql.Timestamp;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -93,6 +95,28 @@ public class ChapterRepository {
                 editorChatId,
                 chapterId
         );
+    }
+
+    public boolean updateIfUnchanged(
+            long chapterId,
+            String title,
+            String text,
+            long editorChatId,
+            LocalDateTime expectedUpdatedAt
+    ) {
+        int updated = jdbcTemplate.update(
+                """
+                UPDATE chapters
+                SET title = ?, text = ?, last_editor_chat_id = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND updated_at = ?
+                """,
+                title,
+                text,
+                editorChatId,
+                chapterId,
+                Timestamp.valueOf(expectedUpdatedAt)
+        );
+        return updated > 0;
     }
 
     public void delete(long chapterId, long novelId) {

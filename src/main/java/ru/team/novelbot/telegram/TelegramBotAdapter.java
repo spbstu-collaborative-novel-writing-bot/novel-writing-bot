@@ -2,12 +2,12 @@ package ru.team.novelbot.telegram;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import ru.team.novelbot.config.AppProperties;
 
-import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URLEncoder;
@@ -16,7 +16,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -28,6 +27,7 @@ public class TelegramBotAdapter {
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
     private final CommandRouter commandRouter;
+    private final TelegramClient telegramClient;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private volatile boolean running;
     private long offset;
@@ -36,12 +36,14 @@ public class TelegramBotAdapter {
             AppProperties properties,
             HttpClient httpClient,
             ObjectMapper objectMapper,
-            CommandRouter commandRouter
+            CommandRouter commandRouter,
+            TelegramClient telegramClient
     ) {
         this.properties = properties;
         this.httpClient = httpClient;
         this.objectMapper = objectMapper;
         this.commandRouter = commandRouter;
+        this.telegramClient = telegramClient;
     }
 
     public void start() {
@@ -70,7 +72,7 @@ public class TelegramBotAdapter {
     private void pollOnce() throws IOException, InterruptedException {
         String url = telegramUrl("getUpdates")
                 + "?timeout=30&offset=" + offset + "&allowed_updates="
-                + encode("[\"message\"]");
+                + encode("[\"message\",\"callback_query\"]");
         HttpRequest request = HttpRequest.newBuilder(URI.create(url))
                 .timeout(Duration.ofSeconds(40))
                 .GET()
@@ -86,28 +88,66 @@ public class TelegramBotAdapter {
             offset = update.path("update_id").asLong() + 1;
             TelegramInboundMessage inbound = toInbound(update);
             if (inbound != null) {
-                String answer = commandRouter.route(inbound);
-                sendMessage(inbound.chatId(), answer);
+                TelegramResponse answer = commandRouter.route(inbound);
+                for (TelegramAction action : answer.actions()) {
+                    telegramClient.execute(action);
+                }
             }
         }
     }
 
     private TelegramInboundMessage toInbound(JsonNode update) {
+        if (update.has("callback_query")) {
+            return callbackInbound(update.path("callback_query"));
+        }
         JsonNode message = update.path("message");
         if (message.isMissingNode()) {
             return null;
         }
+        return messageInbound(message);
+    }
+
+    private TelegramInboundMessage callbackInbound(JsonNode callback) {
+        JsonNode message = callback.path("message");
+        long chatId = message.path("chat").path("id").asLong();
+        JsonNode from = callback.path("from");
+        return new TelegramInboundMessage(
+                TelegramUpdateType.CALLBACK,
+                chatId,
+                nullableText(from.path("username")),
+                displayName(from),
+                null,
+                false,
+                nullableText(callback.path("id")),
+                message.path("message_id").isMissingNode() ? null : message.path("message_id").asInt(),
+                nullableText(callback.path("data")),
+                null,
+                null,
+                null
+        );
+    }
+
+    private TelegramInboundMessage messageInbound(JsonNode message) {
         long chatId = message.path("chat").path("id").asLong();
         JsonNode from = message.path("from");
         String username = nullableText(from.path("username"));
         String displayName = displayName(from);
         JsonNode text = message.path("text");
+        JsonNode document = message.path("document");
+        JsonNode webAppData = message.path("web_app_data");
         return new TelegramInboundMessage(
+                TelegramUpdateType.MESSAGE,
                 chatId,
                 username,
                 displayName,
                 text.isMissingNode() ? null : text.asText(),
-                !text.isMissingNode()
+                !text.isMissingNode(),
+                null,
+                null,
+                null,
+                document.isMissingNode() ? null : nullableText(document.path("file_id")),
+                document.isMissingNode() ? null : nullableText(document.path("file_name")),
+                webAppData.isMissingNode() ? null : nullableText(webAppData.path("data"))
         );
     }
 
@@ -120,27 +160,6 @@ public class TelegramBotAdapter {
 
     private String nullableText(JsonNode node) {
         return node == null || node.isMissingNode() || node.isNull() ? null : node.asText();
-    }
-
-    private void sendMessage(long chatId, String text) {
-        try {
-            String body = objectMapper.writeValueAsString(Map.of(
-                    "chat_id", chatId,
-                    "text", MessageFormatter.telegramSafe(text),
-                    "disable_web_page_preview", true
-            ));
-            HttpRequest request = HttpRequest.newBuilder(URI.create(telegramUrl("sendMessage")))
-                    .timeout(Duration.ofSeconds(20))
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-                    .build();
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            if (response.statusCode() >= 300) {
-                log.warn("Telegram sendMessage вернул HTTP {}: {}", response.statusCode(), response.body());
-            }
-        } catch (Exception ex) {
-            log.warn("Не удалось отправить сообщение в Telegram: {}", ex.getMessage());
-        }
     }
 
     private String telegramUrl(String method) {

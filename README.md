@@ -45,14 +45,15 @@ src/test/java  автотесты и Spring REST Docs
 | Переменная | Назначение |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Токен Telegram-бота |
+| `TELEGRAM_WEB_APP_URL` | HTTPS URL Mini App редактора главы, например `https://example.com/mini/chapter-editor`; если пустой, WebUI-кнопка скрыта |
 | `ADMIN_CHAT_IDS` | Список chat_id администраторов через запятую |
 | `HTTP_ADMIN_TOKEN` | Токен для `GET /users` |
 | `HTTP_PORT` | HTTP-порт приложения, по умолчанию `8080` |
 | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Подключение к PostgreSQL |
 | `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `RABBITMQ_QUEUE` | Подключение к RabbitMQ |
-| `LLM_API_KEY` | Ключ LLM API; если пустой, LLM-команды недоступны |
-| `LLM_API_URL` | OpenAI-compatible endpoint |
-| `LLM_MODEL` | Имя модели |
+| `LLM_PROVIDER` | `GIGACHAT` или `OPENAI_COMPATIBLE`; по умолчанию `GIGACHAT` |
+| `GIGACHAT_AUTH_KEY`, `GIGACHAT_SCOPE`, `GIGACHAT_OAUTH_URL` | Авторизация GigaChat API для демонстрационного РФ-friendly режима |
+| `LLM_API_KEY`, `LLM_API_URL`, `LLM_MODEL` | Настройки generic OpenAI-compatible endpoint; для GigaChat можно оставить пустыми, если используются дефолты |
 | `PROJECT_AUTHORS` | Авторы для `/healthcheck` |
 
 Секреты не должны попадать в репозиторий.
@@ -78,41 +79,33 @@ docker compose up --build
 
 Compose поднимает приложение, PostgreSQL с volume `postgres_data` и RabbitMQ Management UI на `http://localhost:15672`.
 
-## Telegram-команды
+## Telegram-команды и кнопки
 
 ```text
 /start
 /help
-/new_novel <название> | <описание> | <жанр>
-/my_novels
-/novel <novel_id>
+/new
+/novels
+/cancel
 /delete_novel <novel_id>
 /invite_author <novel_id> <chat_id>
 /remove_author <novel_id> <chat_id>
-/authors <novel_id>
-/add_chapter <novel_id> | <название главы> | <текст главы>
-/chapters <novel_id>
-/chapter <novel_id> <chapter_id>
-/full_text <novel_id>
-/update_chapter <novel_id> <chapter_id> | <новое название> | <новый текст>
-/delete_chapter <novel_id> <chapter_id>
-/chapter_history <novel_id> <chapter_id>
-/continue_chapter <novel_id> <chapter_id>
-/advice <novel_id> <вопрос>
-/draft <novel_id> <запрос>
 /request_status <request_id>
 ```
+
+Обычная работа идет через inline-кнопки: `/novels` показывает список романов с пагинацией, карточка романа открывает главы, карточка главы дает действия `Открыть редактор`, `Скачать .txt`, `Заменить текст`, `Добавить в конец`, `История` и `LLM продолжить`.
+
+Старые команды с ID и синтаксисом через `|` оставлены как совместимость, но скрыты из основной справки.
 
 Пример сценария:
 
 ```text
 /start
-/new_novel Звезды над городом | История о будущем мегаполисе | фантастика
-/my_novels
-/add_chapter 1 | Пролог | Ночь над городом была слишком тихой.
-/chapter 1 1
-/continue_chapter 1 1
-/request_status 1
+/new
+<бот пошагово спросит название, описание и жанр>
+/novels
+<выберите роман кнопкой>
+<откройте главы и добавьте новую главу кнопкой>
 ```
 
 ## HTTP endpoints
@@ -137,6 +130,15 @@ gradle asciidoctor
 
 HTML будет создан в `build/docs/asciidoc/index.html`.
 
+Mini App редактор главы:
+
+- `GET /mini/chapter-editor` — HTML WebUI редактора.
+- `GET /mini/api/chapters/{novelId}/{chapterId}` — загрузить главу.
+- `PUT /mini/api/chapters/{novelId}/{chapterId}` — сохранить главу с optimistic check по `updated_at`.
+- `GET /mini/api/chapters/{novelId}/{chapterId}/history` — последние версии главы.
+
+Mini App API требует заголовок `X-Telegram-Init-Data`; подпись проверяется по `TELEGRAM_BOT_TOKEN`.
+
 ## База данных
 
 Минимальные таблицы:
@@ -146,7 +148,8 @@ HTML будет создан в `build/docs/asciidoc/index.html`.
 - `novel_authors`: роль `OWNER` или `CO_AUTHOR`
 - `chapters`: заголовок, текст, порядок, последний редактор
 - `chapter_history`: последние версии главы перед изменением
-- `llm_requests`: тип запроса, статус `QUEUED`, `PROCESSING`, `DONE`, `ERROR`, prompt, result/error
+- `llm_requests`: тип запроса, статус `QUEUED`, `PROCESSING`, `DONE`, `ERROR`, provider/model, prompt, result/error, время завершения
+- `telegram_sessions`: пошаговые сценарии Telegram, например создание романа и ожидание текста главы
 
 Права доступа проверяются по `novel_authors`. Системная роль `Admin` дает доступ только к `/users`, но не открывает чужие произведения в Telegram.
 
@@ -156,19 +159,19 @@ HTML будет создан в `build/docs/asciidoc/index.html`.
 gradle test
 ```
 
-Покрыты регистрация пользователя, создание произведения, проверка доступа, добавление главы, история изменений, создание LLM-запроса со статусом `QUEUED`, а также `/healthcheck` и `/users` для REST Docs.
+Покрыты регистрация пользователя, создание произведения, проверка доступа, добавление главы, история изменений, статистика романа, optimistic conflict при сохранении главы, создание LLM-запроса со статусом `QUEUED`, Telegram callback-кнопки, WebUI-кнопка, `/healthcheck`, `/users` и базовые Mini App endpoints.
 
 ## Ручная проверка
 
 1. Запустите `docker compose up --build`.
 2. Выполните в Telegram `/start` и `/help`.
-3. Создайте произведение через `/new_novel`.
-4. Добавьте главу через `/add_chapter`.
-5. Посмотрите главу через `/chapter` и полный текст через `/full_text`.
+3. Создайте произведение через `/new`.
+4. Откройте `/novels`, выберите роман и добавьте главу кнопкой.
+5. Проверьте карточку главы, скачивание `.txt`, замену текста и Mini App редактор, если задан `TELEGRAM_WEB_APP_URL`.
 6. Вторым пользователем выполните `/start`, затем владельцем добавьте его через `/invite_author`.
 7. Проверьте, что третий пользователь без доступа не видит чужое произведение.
-8. Выполните `/continue_chapter`, `/advice` или `/draft`.
-9. Проверьте статус через `/request_status`.
+8. Выполните LLM-действия кнопками в карточке романа или главы.
+9. Проверьте, что бот сам присылает результат или ошибку LLM; при необходимости проверьте `/request_status`.
 10. Проверьте `GET /healthcheck`.
 11. Проверьте `GET /users` без токена и с корректным `X-Admin-Token`.
 

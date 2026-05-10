@@ -13,8 +13,11 @@ import ru.team.novelbot.domain.LlmRequest;
 import ru.team.novelbot.domain.LlmRequestStatus;
 import ru.team.novelbot.llm.LlmClient;
 import ru.team.novelbot.repository.LlmRequestRepository;
+import ru.team.novelbot.telegram.TelegramButton;
+import ru.team.novelbot.telegram.TelegramClient;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -26,6 +29,7 @@ public class LlmWorker {
     private final ObjectMapper objectMapper;
     private final LlmRequestRepository llmRequestRepository;
     private final LlmClient llmClient;
+    private final TelegramClient telegramClient;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private volatile boolean running;
 
@@ -33,12 +37,14 @@ public class LlmWorker {
             AppProperties properties,
             ObjectMapper objectMapper,
             LlmRequestRepository llmRequestRepository,
-            LlmClient llmClient
+            LlmClient llmClient,
+            TelegramClient telegramClient
     ) {
         this.properties = properties;
         this.objectMapper = objectMapper;
         this.llmRequestRepository = llmRequestRepository;
         this.llmClient = llmClient;
+        this.telegramClient = telegramClient;
     }
 
     public void start() {
@@ -91,6 +97,7 @@ public class LlmWorker {
             try {
                 String result = llmClient.generate(request.prompt());
                 llmRequestRepository.updateStatus(request.id(), LlmRequestStatus.DONE, result, null);
+                notifyDone(request, result);
             } catch (Exception ex) {
                 llmRequestRepository.updateStatus(
                         request.id(),
@@ -98,6 +105,7 @@ public class LlmWorker {
                         null,
                         "Не удалось получить ответ от языковой модели. Попробуйте позже."
                 );
+                notifyError(request);
                 log.warn("LLM request {} failed: {}", request.id(), ex.getMessage());
             }
             channel.basicAck(deliveryTag, false);
@@ -109,6 +117,30 @@ public class LlmWorker {
             }
             log.warn("Некорректное сообщение LLM worker: {}", ex.getMessage());
         }
+    }
+
+    private void notifyDone(LlmRequest request, String result) {
+        String preview = result.length() > 3000
+                ? result.substring(0, 2800) + "\n\nРезультат длинный, полный текст отправлен .txt файлом."
+                : result;
+        List<List<TelegramButton>> keyboard = request.chapterId() == null
+                ? List.of()
+                : List.of(List.of(TelegramButton.callback("Добавить в конец главы", "llm:add:" + request.id())));
+        telegramClient.sendMessage(
+                request.chatId(),
+                "LLM-запрос #" + request.id() + " готов.\n\n" + preview,
+                keyboard
+        );
+        if (result.length() > 3000) {
+            telegramClient.sendDocument(request.chatId(), "llm-request-" + request.id() + ".txt", result);
+        }
+    }
+
+    private void notifyError(LlmRequest request) {
+        telegramClient.sendMessage(
+                request.chatId(),
+                "LLM-запрос #" + request.id() + " завершился ошибкой. Не удалось получить ответ от языковой модели, попробуйте позже."
+        );
     }
 
     private ConnectionFactory connectionFactory() {

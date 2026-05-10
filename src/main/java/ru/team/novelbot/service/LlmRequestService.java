@@ -115,7 +115,15 @@ public class LlmRequestService {
             LlmRequestType requestType,
             String prompt
     ) {
-        LlmRequest request = llmRequestRepository.create(chatId, novelId, chapterId, requestType, prompt);
+        LlmRequest request = llmRequestRepository.create(
+                chatId,
+                novelId,
+                chapterId,
+                requestType,
+                prompt,
+                properties.llm().effectiveProvider(),
+                properties.llm().effectiveModel()
+        );
         try {
             taskPublisher.publish(new LlmTask(request.id(), request.requestType().name()));
             return request;
@@ -137,7 +145,7 @@ public class LlmRequestService {
 
     private void ensureLlmEnabled() {
         if (!properties.llm().enabled()) {
-            throw new AppException("LLM-функции недоступны: не задан LLM_API_KEY.");
+            throw new AppException("LLM-функции недоступны: задайте GIGACHAT_AUTH_KEY или LLM_API_KEY.");
         }
     }
 }

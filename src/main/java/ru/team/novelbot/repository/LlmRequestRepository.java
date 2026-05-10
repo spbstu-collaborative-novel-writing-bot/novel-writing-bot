@@ -11,6 +11,7 @@ import ru.team.novelbot.domain.LlmRequestType;
 
 import java.sql.PreparedStatement;
 import java.sql.Types;
+import java.time.LocalDateTime;
 import java.util.Optional;
 
 @Repository
@@ -21,13 +22,21 @@ public class LlmRequestRepository {
         this.jdbcTemplate = jdbcTemplate;
     }
 
-    public LlmRequest create(long chatId, long novelId, Long chapterId, LlmRequestType type, String prompt) {
+    public LlmRequest create(
+            long chatId,
+            long novelId,
+            Long chapterId,
+            LlmRequestType type,
+            String prompt,
+            String provider,
+            String model
+    ) {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbcTemplate.update(connection -> {
             PreparedStatement ps = connection.prepareStatement(
                     """
-                    INSERT INTO llm_requests(chat_id, novel_id, chapter_id, request_type, status, prompt)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO llm_requests(chat_id, novel_id, chapter_id, request_type, status, prompt, provider, model)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     new String[]{"id"}
             );
@@ -41,6 +50,8 @@ public class LlmRequestRepository {
             ps.setString(4, type.name());
             ps.setString(5, LlmRequestStatus.QUEUED.name());
             ps.setString(6, prompt);
+            ps.setString(7, provider);
+            ps.setString(8, model);
             return ps;
         }, keyHolder);
         return findById(keyHolder.getKey().longValue()).orElseThrow();
@@ -50,7 +61,7 @@ public class LlmRequestRepository {
         return jdbcTemplate.query(
                 """
                 SELECT id, chat_id, novel_id, chapter_id, request_type, status, prompt, result,
-                       error_message, created_at, updated_at
+                       error_message, created_at, updated_at, provider, model, completed_at
                 FROM llm_requests
                 WHERE id = ?
                 """,
@@ -63,12 +74,16 @@ public class LlmRequestRepository {
         jdbcTemplate.update(
                 """
                 UPDATE llm_requests
-                SET status = ?, result = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP
+                SET status = ?, result = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP,
+                    completed_at = ?
                 WHERE id = ?
                 """,
                 status.name(),
                 result,
                 errorMessage,
+                status == LlmRequestStatus.DONE || status == LlmRequestStatus.ERROR
+                        ? java.sql.Timestamp.valueOf(LocalDateTime.now())
+                        : null,
                 id
         );
     }
@@ -88,7 +103,10 @@ public class LlmRequestRepository {
                     rs.getString("result"),
                     rs.getString("error_message"),
                     rs.getTimestamp("created_at").toLocalDateTime(),
-                    rs.getTimestamp("updated_at").toLocalDateTime()
+                    rs.getTimestamp("updated_at").toLocalDateTime(),
+                    rs.getString("provider"),
+                    rs.getString("model"),
+                    rs.getTimestamp("completed_at") == null ? null : rs.getTimestamp("completed_at").toLocalDateTime()
             );
         };
     }

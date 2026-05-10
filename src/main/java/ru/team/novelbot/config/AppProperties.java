@@ -8,6 +8,7 @@ import java.util.stream.Collectors;
 
 public record AppProperties(
         String telegramBotToken,
+        String telegramWebAppUrl,
         Set<Long> adminChatIds,
         String httpAdminToken,
         int httpPort,
@@ -40,8 +41,16 @@ public record AppProperties(
             throw new IllegalStateException("ADMIN_CHAT_IDS должен содержать хотя бы один chat_id администратора.");
         }
 
+        String configuredProvider = env.getOrDefault("LLM_PROVIDER", "").trim();
+        String llmApiKey = env.getOrDefault("LLM_API_KEY", "");
+        String gigachatAuthKey = env.getOrDefault("GIGACHAT_AUTH_KEY", "");
+        String provider = configuredProvider.isBlank()
+                ? (!llmApiKey.isBlank() && gigachatAuthKey.isBlank() ? Llm.OPENAI_COMPATIBLE : Llm.GIGACHAT)
+                : configuredProvider;
+
         return new AppProperties(
                 telegramToken,
+                env.getOrDefault("TELEGRAM_WEB_APP_URL", "").trim(),
                 parsedAdminIds,
                 httpToken,
                 integer(env.getOrDefault("HTTP_PORT", "8080"), "HTTP_PORT"),
@@ -54,9 +63,13 @@ public record AppProperties(
                         env.getOrDefault("RABBITMQ_QUEUE", "llm.requests")
                 ),
                 new Llm(
-                        env.getOrDefault("LLM_API_KEY", ""),
-                        env.getOrDefault("LLM_API_URL", "https://api.openai.com/v1/chat/completions"),
-                        env.getOrDefault("LLM_MODEL", "gpt-4o-mini")
+                        provider,
+                        llmApiKey,
+                        env.getOrDefault("LLM_API_URL", ""),
+                        env.getOrDefault("LLM_MODEL", ""),
+                        gigachatAuthKey,
+                        env.getOrDefault("GIGACHAT_SCOPE", "GIGACHAT_API_PERS"),
+                        env.getOrDefault("GIGACHAT_OAUTH_URL", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth")
                 ),
                 parseAuthors(env.getOrDefault(
                         "PROJECT_AUTHORS",
@@ -112,9 +125,49 @@ public record AppProperties(
     public record Rabbit(String host, int port, String username, String password, String queue) {
     }
 
-    public record Llm(String apiKey, String apiUrl, String model) {
+    public record Llm(
+            String provider,
+            String apiKey,
+            String apiUrl,
+            String model,
+            String gigachatAuthKey,
+            String gigachatScope,
+            String gigachatOauthUrl
+    ) {
+        public static final String GIGACHAT = "GIGACHAT";
+        public static final String OPENAI_COMPATIBLE = "OPENAI_COMPATIBLE";
+
+        public boolean gigachat() {
+            return GIGACHAT.equalsIgnoreCase(provider);
+        }
+
         public boolean enabled() {
+            if (gigachat()) {
+                return gigachatAuthKey != null && !gigachatAuthKey.isBlank();
+            }
             return apiKey != null && !apiKey.isBlank();
+        }
+
+        public String effectiveApiUrl() {
+            if (gigachat()) {
+                return apiUrl == null || apiUrl.isBlank()
+                        ? "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+                        : apiUrl;
+            }
+            return apiUrl == null || apiUrl.isBlank()
+                    ? "https://api.openai.com/v1/chat/completions"
+                    : apiUrl;
+        }
+
+        public String effectiveModel() {
+            if (model != null && !model.isBlank()) {
+                return model;
+            }
+            return gigachat() ? "GigaChat" : "gpt-4o-mini";
+        }
+
+        public String effectiveProvider() {
+            return provider == null || provider.isBlank() ? GIGACHAT : provider;
         }
     }
 }

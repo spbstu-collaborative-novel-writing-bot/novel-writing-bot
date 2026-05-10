@@ -21,4 +21,11 @@ public final class TextTools {
         }
         return normalized.substring(0, Math.max(0, maxLength - 3)) + "...";
     }
+
+    public static int wordCount(String text) {
+        if (text == null || text.isBlank()) {
+            return 0;
+        }
+        return text.trim().split("\\s+").length;
+    }
 }

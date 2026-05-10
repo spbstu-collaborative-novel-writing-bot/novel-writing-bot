@@ -6,6 +6,9 @@ public record NovelDetails(
         Novel novel,
         AppUser owner,
         List<NovelAuthor> authors,
-        int chapterCount
+        NovelStats stats
 ) {
+    public int chapterCount() {
+        return stats.chapterCount();
+    }
 }

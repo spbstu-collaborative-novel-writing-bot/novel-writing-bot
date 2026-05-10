@@ -47,8 +47,8 @@ class ServiceIntegrationTest {
         LlmRequestRepository llmRequestRepository = new LlmRequestRepository(jdbcTemplate);
         AccessControlService accessControlService = new AccessControlService(novelRepository);
         userAuthService = new UserAuthService(userRepository, properties);
-        novelService = new NovelService(novelRepository, userAuthService, accessControlService, transactionTemplate);
         chapterService = new ChapterService(chapterRepository, novelRepository, accessControlService, transactionTemplate);
+        novelService = new NovelService(novelRepository, chapterRepository, userAuthService, accessControlService, transactionTemplate);
         publishedTasks = new ArrayList<>();
         LlmTaskPublisher publisher = publishedTasks::add;
         llmRequestService = new LlmRequestService(
@@ -128,7 +128,43 @@ class ServiceIntegrationTest {
         var request = llmRequestService.continueChapter(100, novel.id(), chapter.id());
 
         assertThat(request.status()).isEqualTo(LlmRequestStatus.QUEUED);
+        assertThat(request.provider()).isEqualTo("OPENAI_COMPATIBLE");
+        assertThat(request.model()).isEqualTo("test-model");
         assertThat(publishedTasks).containsExactly(new LlmTask(request.id(), "CONTINUE_CHAPTER"));
+    }
+
+    @Test
+    void calculatesNovelStats() {
+        userAuthService.registerOrUpdate(100, "owner", "Owner");
+        var novel = novelService.createNovel(100, "City", "Story", "fantasy");
+        chapterService.addChapter(100, novel.id(), "One", "one two three");
+        chapterService.addChapter(100, novel.id(), "Two", "four five");
+
+        var details = novelService.getDetails(100, novel.id());
+
+        assertThat(details.stats().chapterCount()).isEqualTo(2);
+        assertThat(details.stats().wordCount()).isEqualTo(5);
+        assertThat(details.stats().characterCount()).isEqualTo("one two three".length() + "four five".length());
+    }
+
+    @Test
+    void detectsStaleChapterUpdate() {
+        userAuthService.registerOrUpdate(100, "owner", "Owner");
+        var novel = novelService.createNovel(100, "City", "Story", "fantasy");
+        var chapter = chapterService.addChapter(100, novel.id(), "One", "first");
+
+        chapterService.updateChapter(100, novel.id(), chapter.id(), "One", "changed");
+        var result = chapterService.updateChapterIfUnchanged(
+                100,
+                novel.id(),
+                chapter.id(),
+                "One",
+                "stale",
+                chapter.updatedAt()
+        );
+
+        assertThat(result.saved()).isFalse();
+        assertThat(result.chapter().text()).isEqualTo("changed");
     }
 
     private DataSource dataSource() {
@@ -144,12 +180,13 @@ class ServiceIntegrationTest {
     private AppProperties testProperties() {
         return new AppProperties(
                 "telegram-token",
+                "",
                 Set.of(100L),
                 "secret",
                 8080,
                 new AppProperties.Database("localhost", 5432, "novelbot", "user", "password"),
                 new AppProperties.Rabbit("localhost", 5672, "guest", "guest", "llm.requests"),
-                new AppProperties.Llm("llm-key", "http://localhost/llm", "test-model"),
+                new AppProperties.Llm("OPENAI_COMPATIBLE", "llm-key", "http://localhost/llm", "test-model", "", "GIGACHAT_API_PERS", "http://localhost/oauth"),
                 List.of("Гвоздева Е.", "Крутиков Д.", "Михайлова А.", "Романова А.")
         );
     }

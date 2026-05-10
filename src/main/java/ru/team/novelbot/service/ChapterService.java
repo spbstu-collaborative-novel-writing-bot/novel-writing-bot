@@ -3,10 +3,12 @@ package ru.team.novelbot.service;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import ru.team.novelbot.domain.Chapter;
+import ru.team.novelbot.domain.ChapterEditResult;
 import ru.team.novelbot.domain.ChapterHistory;
 import ru.team.novelbot.repository.ChapterRepository;
 import ru.team.novelbot.repository.NovelRepository;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -67,6 +69,45 @@ public class ChapterService {
                     .orElseThrow(() -> new AppException("Глава не найдена."));
             chapterRepository.saveHistory(oldChapter, chatId);
             chapterRepository.update(chapterId, newTitle, newText, chatId);
+            novelRepository.touch(novelId);
+            return chapterRepository.findByIdAndNovelId(chapterId, novelId).orElseThrow();
+        });
+    }
+
+    public ChapterEditResult updateChapterIfUnchanged(
+            long chatId,
+            long novelId,
+            long chapterId,
+            String newTitle,
+            String newText,
+            LocalDateTime expectedUpdatedAt
+    ) {
+        accessControlService.requireAccess(novelId, chatId);
+        return transactionTemplate.execute(status -> {
+            Chapter oldChapter = chapterRepository.findByIdAndNovelId(chapterId, novelId)
+                    .orElseThrow(() -> new AppException("Глава не найдена."));
+            if (!oldChapter.updatedAt().equals(expectedUpdatedAt)) {
+                return new ChapterEditResult(false, oldChapter);
+            }
+            chapterRepository.saveHistory(oldChapter, chatId);
+            boolean updated = chapterRepository.updateIfUnchanged(chapterId, newTitle, newText, chatId, expectedUpdatedAt);
+            if (!updated) {
+                Chapter current = chapterRepository.findByIdAndNovelId(chapterId, novelId).orElseThrow();
+                return new ChapterEditResult(false, current);
+            }
+            novelRepository.touch(novelId);
+            return new ChapterEditResult(true, chapterRepository.findByIdAndNovelId(chapterId, novelId).orElseThrow());
+        });
+    }
+
+    public Chapter appendToChapter(long chatId, long novelId, long chapterId, String addition) {
+        accessControlService.requireAccess(novelId, chatId);
+        return transactionTemplate.execute(status -> {
+            Chapter oldChapter = chapterRepository.findByIdAndNovelId(chapterId, novelId)
+                    .orElseThrow(() -> new AppException("Глава не найдена."));
+            String separator = oldChapter.text().isBlank() ? "" : "\n\n";
+            chapterRepository.saveHistory(oldChapter, chatId);
+            chapterRepository.update(chapterId, oldChapter.title(), oldChapter.text() + separator + addition, chatId);
             novelRepository.touch(novelId);
             return chapterRepository.findByIdAndNovelId(chapterId, novelId).orElseThrow();
         });
