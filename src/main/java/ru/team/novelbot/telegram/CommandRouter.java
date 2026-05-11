@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import ru.team.novelbot.config.AppProperties;
+import ru.team.novelbot.domain.AuthorType;
 import ru.team.novelbot.domain.Chapter;
 import ru.team.novelbot.domain.ChapterHistory;
 import ru.team.novelbot.domain.LlmRequest;
@@ -128,28 +129,9 @@ public class CommandRouter {
         return switch (parsed.command()) {
             case "/start" -> TelegramResponse.of(TelegramAction.send(message.chatId(), start(), homeKeyboard()));
             case "/help" -> TelegramResponse.of(TelegramAction.send(message.chatId(), help(), homeKeyboard()));
-            case "/new", "/new_novel" -> startNewNovel(message.chatId(), parsed.args());
-            case "/novels", "/my_novels" -> novels(message.chatId(), 0, null);
-            case "/novel" -> TelegramResponse.of(TelegramAction.send(
-                    message.chatId(),
-                    "Теперь роман открывается через список. Нажмите /novels и выберите нужное произведение кнопкой.",
-                    homeKeyboard()
-            ));
+            case "/new" -> startNewNovel(message.chatId());
+            case "/novels" -> novels(message.chatId(), 0, null);
             case "/request_status" -> requestStatus(message.chatId(), parsed.args());
-            case "/delete_novel" -> deleteNovel(message.chatId(), parsed.args());
-            case "/invite_author" -> inviteAuthor(message.chatId(), parsed.args());
-            case "/remove_author" -> removeAuthor(message.chatId(), parsed.args());
-            case "/authors" -> authorsLegacy(message.chatId(), parsed.args());
-            case "/add_chapter" -> addChapterLegacy(message.chatId(), parsed.args());
-            case "/chapters" -> chaptersLegacy(message.chatId(), parsed.args());
-            case "/chapter" -> chapterLegacy(message.chatId(), parsed.args());
-            case "/full_text" -> fullTextLegacy(message.chatId(), parsed.args());
-            case "/update_chapter" -> updateChapterLegacy(message.chatId(), parsed.args());
-            case "/delete_chapter" -> deleteChapter(message.chatId(), parsed.args());
-            case "/chapter_history" -> chapterHistoryLegacy(message.chatId(), parsed.args());
-            case "/continue_chapter" -> continueChapterLegacy(message.chatId(), parsed.args());
-            case "/advice" -> adviceLegacy(message.chatId(), parsed.args());
-            case "/draft" -> draftLegacy(message.chatId(), parsed.args());
             default -> TelegramResponse.of(TelegramAction.send(
                     message.chatId(),
                     "Команда не распознана. Введите /help для списка основных действий.",
@@ -171,10 +153,13 @@ public class CommandRouter {
             case "edit" -> startChapterEdit(message.chatId(), parts);
             case "hist" -> chapterHistory(message.chatId(), parseLong(parts, 1), parseLong(parts, 2), message.callbackMessageId());
             case "authors" -> authors(message.chatId(), parseLong(parts, 1), message.callbackMessageId());
+            case "author" -> authorAction(message.chatId(), parts);
             case "llm" -> llmAction(message.chatId(), parts);
-            case "new" -> startNewNovel(message.chatId(), "");
+            case "delnovel" -> deleteNovelAction(message.chatId(), parts, message.callbackMessageId());
+            case "delchapter" -> deleteChapterAction(message.chatId(), parts, message.callbackMessageId());
+            case "new" -> startNewNovel(message.chatId());
             case "noop" -> TelegramResponse.of(TelegramAction.send(message.chatId(), "Действие уже выполнено.", List.of()));
-            default -> TelegramResponse.of(TelegramAction.send(message.chatId(), "Кнопка устарела. Откройте /novels заново.", homeKeyboard()));
+            default -> TelegramResponse.of(TelegramAction.send(message.chatId(), "Кнопка недоступна. Откройте /novels заново.", homeKeyboard()));
         };
     }
 
@@ -190,9 +175,11 @@ public class CommandRouter {
             case "RENAME_CHAPTER" -> sessionRenameChapter(message, session);
             case "ADVICE_QUESTION" -> sessionAdvice(message, session);
             case "DRAFT_REQUEST" -> sessionDraft(message, session);
+            case "ADD_AUTHOR" -> sessionAddAuthor(message, session);
+            case "REMOVE_AUTHOR" -> sessionRemoveAuthor(message, session);
             default -> {
                 sessionRepository.delete(message.chatId());
-                yield TelegramResponse.of(TelegramAction.send(message.chatId(), "Сценарий устарел. Начните действие заново.", homeKeyboard()));
+                yield TelegramResponse.of(TelegramAction.send(message.chatId(), "Сценарий сброшен. Начните действие заново.", homeKeyboard()));
             }
         };
     }
@@ -216,14 +203,10 @@ public class CommandRouter {
                 /cancel - отменить текущее действие
 
                 Внутри карточек романов и глав используйте кнопки: главы, редактор, .txt, история и LLM.
-                Старые команды с ID оставлены только как совместимость и не нужны в обычной работе.
                 """;
     }
 
-    private TelegramResponse startNewNovel(long chatId, String args) {
-        if (args != null && !args.isBlank() && args.contains("|")) {
-            return newNovelLegacy(chatId, args);
-        }
+    private TelegramResponse startNewNovel(long chatId) {
         sessionRepository.save(chatId, "CREATE_NOVEL_TITLE", null, null, "{}");
         return TelegramResponse.of(TelegramAction.send(
                 chatId,
@@ -300,7 +283,7 @@ public class CommandRouter {
 
                 Жанр: %s
                 Описание: %s
-                Владелец: %s
+                Создатель: %s
                 Создано: %s
                 Обновлено: %s
 
@@ -393,6 +376,51 @@ public class CommandRouter {
         throw new UsageException("Некорректная кнопка.");
     }
 
+    private TelegramResponse deleteNovelAction(long chatId, String[] parts, Integer messageId) {
+        long novelId = parseLong(parts, 1);
+        String mode = parts.length > 2 ? parts[2] : "";
+        if ("confirm".equals(mode)) {
+            novelService.deleteNovel(chatId, novelId);
+            return TelegramResponse.of(cardAction(chatId, messageId, "Роман удалён.", homeKeyboard()));
+        }
+        requireNovelOwner(chatId, novelId);
+        NovelDetails details = novelService.getDetails(chatId, novelId);
+        return TelegramResponse.of(cardAction(
+                chatId,
+                messageId,
+                "Удалить роман «" + details.novel().title() + "»?",
+                List.of(
+                        List.of(TelegramButton.callback("Удалить", "delnovel:" + novelId + ":confirm")),
+                        List.of(TelegramButton.callback("Назад к роману", "novel:" + novelId))
+                )
+        ));
+    }
+
+    private TelegramResponse deleteChapterAction(long chatId, String[] parts, Integer messageId) {
+        long novelId = parseLong(parts, 1);
+        long chapterId = parseLong(parts, 2);
+        String mode = parts.length > 3 ? parts[3] : "";
+        if ("confirm".equals(mode)) {
+            chapterService.deleteChapter(chatId, novelId, chapterId);
+            return TelegramResponse.of(cardAction(
+                    chatId,
+                    messageId,
+                    "Глава удалена.",
+                    List.of(List.of(TelegramButton.callback("К главам", "chapters:" + novelId + ":0")))
+            ));
+        }
+        Chapter chapter = chapterService.getChapter(chatId, novelId, chapterId);
+        return TelegramResponse.of(cardAction(
+                chatId,
+                messageId,
+                "Удалить главу " + chapter.orderNumber() + ". " + chapter.title() + "?",
+                List.of(
+                        List.of(TelegramButton.callback("Удалить", "delchapter:" + novelId + ":" + chapterId + ":confirm")),
+                        List.of(TelegramButton.callback("Назад к главе", "chapter:" + novelId + ":" + chapterId))
+                )
+        ));
+    }
+
     private TelegramResponse startAddChapter(long chatId, long novelId) {
         novelService.requireNovel(chatId, novelId);
         sessionRepository.save(chatId, "ADD_CHAPTER_TITLE", novelId, null, "{}");
@@ -483,6 +511,8 @@ public class CommandRouter {
 
     private TelegramResponse authors(long chatId, long novelId, Integer messageId) {
         List<NovelAuthor> authors = novelService.listAuthors(chatId, novelId);
+        boolean owner = authors.stream()
+                .anyMatch(author -> author.chatId() == chatId && author.authorType() == AuthorType.OWNER);
         String text = authors.stream()
                 .map(author -> "%d %s - %s".formatted(
                         author.chatId(),
@@ -490,7 +520,82 @@ public class CommandRouter {
                         author.authorType().displayName()
                 ))
                 .collect(Collectors.joining("\n"));
-        return TelegramResponse.of(cardAction(chatId, messageId, text, List.of(List.of(TelegramButton.callback("Назад к роману", "novel:" + novelId)))));
+        var rows = new java.util.ArrayList<List<TelegramButton>>();
+        if (owner) {
+            rows.add(List.of(
+                    TelegramButton.callback("Добавить владельца", "author:add:" + novelId + ":OWNER"),
+                    TelegramButton.callback("Добавить соавтора", "author:add:" + novelId + ":CO_AUTHOR")
+            ));
+            rows.add(List.of(TelegramButton.callback("Удалить участника", "author:remove:" + novelId)));
+        }
+        rows.add(List.of(TelegramButton.callback("Назад к роману", "novel:" + novelId)));
+        return TelegramResponse.of(cardAction(chatId, messageId, text.isBlank() ? "У романа пока нет авторов." : text, List.copyOf(rows)));
+    }
+
+    private TelegramResponse authorAction(long chatId, String[] parts) {
+        String mode = parts.length > 1 ? parts[1] : "";
+        long novelId = parseLong(parts, 2);
+        if ("add".equals(mode)) {
+            AuthorType authorType = authorType(parts.length > 3 ? parts[3] : "");
+            requireNovelOwner(chatId, novelId);
+            sessionRepository.save(chatId, "ADD_AUTHOR", novelId, null, json(Map.of("role", authorType.name())));
+            String roleName = authorType == AuthorType.OWNER ? "владельца" : "соавтора";
+            return TelegramResponse.of(TelegramAction.send(chatId, "Отправьте chat_id " + roleName + ".", List.of()));
+        }
+        if ("remove".equals(mode)) {
+            requireNovelOwner(chatId, novelId);
+            sessionRepository.save(chatId, "REMOVE_AUTHOR", novelId, null, "{}");
+            return TelegramResponse.of(TelegramAction.send(chatId, "Отправьте chat_id участника, которого нужно удалить.", List.of()));
+        }
+        throw new UsageException("Некорректная кнопка авторов.");
+    }
+
+    private TelegramResponse sessionAddAuthor(TelegramInboundMessage message, TelegramSession session) {
+        long invitedChatId = parseLong(requireText(message, "chat_id пользователя", 30), "chat_id указан неверно.");
+        AuthorType authorType = authorType(payload(session).get("role"));
+        novelService.addAuthor(message.chatId(), session.novelId(), invitedChatId, authorType);
+        sessionRepository.delete(message.chatId());
+        String roleName = authorType == AuthorType.OWNER ? "Владелец добавлен." : "Соавтор добавлен.";
+        return TelegramResponse.builder()
+                .add(TelegramAction.send(message.chatId(), roleName, List.of()))
+                .add(cardAction(message.chatId(), null, authorsText(message.chatId(), session.novelId()), authorsKeyboard(message.chatId(), session.novelId())))
+                .build();
+    }
+
+    private TelegramResponse sessionRemoveAuthor(TelegramInboundMessage message, TelegramSession session) {
+        long targetChatId = parseLong(requireText(message, "chat_id пользователя", 30), "chat_id указан неверно.");
+        novelService.removeAuthor(message.chatId(), session.novelId(), targetChatId);
+        sessionRepository.delete(message.chatId());
+        return TelegramResponse.builder()
+                .add(TelegramAction.send(message.chatId(), "Участник удалён.", List.of()))
+                .add(cardAction(message.chatId(), null, authorsText(message.chatId(), session.novelId()), authorsKeyboard(message.chatId(), session.novelId())))
+                .build();
+    }
+
+    private String authorsText(long chatId, long novelId) {
+        String text = novelService.listAuthors(chatId, novelId).stream()
+                .map(author -> "%d %s - %s".formatted(
+                        author.chatId(),
+                        MessageFormatter.username(author.username()),
+                        author.authorType().displayName()
+                ))
+                .collect(Collectors.joining("\n"));
+        return text.isBlank() ? "У романа пока нет авторов." : text;
+    }
+
+    private List<List<TelegramButton>> authorsKeyboard(long chatId, long novelId) {
+        boolean owner = novelService.listAuthors(chatId, novelId).stream()
+                .anyMatch(author -> author.chatId() == chatId && author.authorType() == AuthorType.OWNER);
+        var rows = new java.util.ArrayList<List<TelegramButton>>();
+        if (owner) {
+            rows.add(List.of(
+                    TelegramButton.callback("Добавить владельца", "author:add:" + novelId + ":OWNER"),
+                    TelegramButton.callback("Добавить соавтора", "author:add:" + novelId + ":CO_AUTHOR")
+            ));
+            rows.add(List.of(TelegramButton.callback("Удалить участника", "author:remove:" + novelId)));
+        }
+        rows.add(List.of(TelegramButton.callback("Назад к роману", "novel:" + novelId)));
+        return List.copyOf(rows);
     }
 
     private TelegramResponse llmAction(long chatId, String[] parts) {
@@ -598,6 +703,7 @@ public class CommandRouter {
                 List.of(TelegramButton.callback("Главы", "chapters:" + novelId + ":0"), TelegramButton.callback("Добавить главу", "addch:" + novelId)),
                 List.of(TelegramButton.callback("Полный текст .txt", "txt:novel:" + novelId), TelegramButton.callback("Авторы", "authors:" + novelId)),
                 List.of(TelegramButton.callback("Совет LLM", "llm:advice:" + novelId), TelegramButton.callback("Черновик LLM", "llm:draft:" + novelId)),
+                List.of(TelegramButton.callback("Удалить роман", "delnovel:" + novelId)),
                 List.of(TelegramButton.callback("К списку романов", "novels:0"))
         );
     }
@@ -629,7 +735,8 @@ public class CommandRouter {
         }
         rows.add(List.of(TelegramButton.callback("Скачать .txt", "txt:chapter:" + novelId + ":" + chapter.id()), TelegramButton.callback("Заменить текст", "edit:replace:" + novelId + ":" + chapter.id())));
         rows.add(List.of(TelegramButton.callback("Добавить в конец", "edit:append:" + novelId + ":" + chapter.id()), TelegramButton.callback("Переименовать", "edit:rename:" + novelId + ":" + chapter.id())));
-        rows.add(List.of(TelegramButton.callback("История", "hist:" + novelId + ":" + chapter.id()), TelegramButton.callback("LLM продолжить", "llm:continue:" + novelId + ":" + chapter.id())));
+        rows.add(List.of(TelegramButton.callback("История", "hist:" + novelId + ":" + chapter.id()), TelegramButton.callback("Удалить главу", "delchapter:" + novelId + ":" + chapter.id())));
+        rows.add(List.of(TelegramButton.callback("LLM продолжить", "llm:continue:" + novelId + ":" + chapter.id())));
         rows.add(List.of(TelegramButton.callback("К главам", "chapters:" + novelId + ":0"), TelegramButton.callback("К роману", "novel:" + novelId)));
         return List.copyOf(rows);
     }
@@ -648,102 +755,6 @@ public class CommandRouter {
         }
         String separator = base.contains("?") ? "&" : "?";
         return base + separator + "novelId=" + novelId + "&chapterId=" + chapterId;
-    }
-
-    private TelegramResponse newNovelLegacy(long chatId, String args) {
-        String[] parts = pipeArgs(args, 3, "Пример: /new_novel Название | Описание | жанр");
-        validateText(parts[0], "Название произведения", 100);
-        validateText(parts[1], "Описание произведения", 1000);
-        validateText(parts[2], "Жанр", 50);
-        var novel = novelService.createNovel(chatId, parts[0], parts[1], parts[2]);
-        return TelegramResponse.of(TelegramAction.send(chatId, "Произведение создано.", List.of(List.of(TelegramButton.callback("Открыть", "novel:" + novel.id())))));
-    }
-
-    private TelegramResponse deleteNovel(long chatId, String args) {
-        long novelId = singleLong(args, "Пример: /delete_novel <novel_id>");
-        novelService.deleteNovel(chatId, novelId);
-        return TelegramResponse.of(TelegramAction.send(chatId, "Произведение удалено.", homeKeyboard()));
-    }
-
-    private TelegramResponse inviteAuthor(long chatId, String args) {
-        long[] values = twoLongs(args, "Пример: /invite_author <novel_id> <chat_id>");
-        novelService.inviteAuthor(chatId, values[0], values[1]);
-        return TelegramResponse.of(TelegramAction.send(chatId, "Соавтор добавлен.", List.of(List.of(TelegramButton.callback("Открыть роман", "novel:" + values[0])))));
-    }
-
-    private TelegramResponse removeAuthor(long chatId, String args) {
-        long[] values = twoLongs(args, "Пример: /remove_author <novel_id> <chat_id>");
-        novelService.removeAuthor(chatId, values[0], values[1]);
-        return TelegramResponse.of(TelegramAction.send(chatId, "Соавтор удалён.", List.of(List.of(TelegramButton.callback("Открыть роман", "novel:" + values[0])))));
-    }
-
-    private TelegramResponse authorsLegacy(long chatId, String args) {
-        return authors(chatId, singleLong(args, "Пример: /authors <novel_id>"), null);
-    }
-
-    private TelegramResponse addChapterLegacy(long chatId, String args) {
-        String[] parts = pipeArgs(args, 3, "Пример: /add_chapter <novel_id> | <название главы> | <текст главы>");
-        long novelId = parseLong(parts[0], "Идентификатор произведения указан неверно.");
-        validateText(parts[1], "Название главы", 100);
-        validateText(parts[2], "Текст главы", 200000);
-        Chapter chapter = chapterService.addChapter(chatId, novelId, parts[1], parts[2]);
-        return TelegramResponse.of(TelegramAction.send(chatId, "Глава добавлена.", chapterKeyboard(novelId, chapter)));
-    }
-
-    private TelegramResponse chaptersLegacy(long chatId, String args) {
-        return chapters(chatId, singleLong(args, "Пример: /chapters <novel_id>"), 0, null);
-    }
-
-    private TelegramResponse chapterLegacy(long chatId, String args) {
-        long[] values = twoLongs(args, "Пример: /chapter <novel_id> <chapter_id>");
-        return chapterCard(chatId, values[0], values[1], null);
-    }
-
-    private TelegramResponse fullTextLegacy(long chatId, String args) {
-        long novelId = singleLong(args, "Пример: /full_text <novel_id>");
-        return TelegramResponse.of(TelegramAction.document(chatId, "novel-" + novelId + ".txt", chapterService.fullText(chatId, novelId)));
-    }
-
-    private TelegramResponse updateChapterLegacy(long chatId, String args) {
-        String[] parts = pipeArgs(args, 3, "Пример: /update_chapter <novel_id> <chapter_id> | <новое название> | <новый текст>");
-        long[] values = twoLongs(parts[0], "Пример: /update_chapter <novel_id> <chapter_id> | <новое название> | <новый текст>");
-        validateText(parts[1], "Название главы", 100);
-        validateText(parts[2], "Текст главы", 200000);
-        Chapter chapter = chapterService.updateChapter(chatId, values[0], values[1], parts[1], parts[2]);
-        return TelegramResponse.of(TelegramAction.send(chatId, "Глава обновлена.", chapterKeyboard(values[0], chapter)));
-    }
-
-    private TelegramResponse deleteChapter(long chatId, String args) {
-        long[] values = twoLongs(args, "Пример: /delete_chapter <novel_id> <chapter_id>");
-        chapterService.deleteChapter(chatId, values[0], values[1]);
-        return TelegramResponse.of(TelegramAction.send(chatId, "Глава удалена.", List.of(List.of(TelegramButton.callback("К главам", "chapters:" + values[0] + ":0")))));
-    }
-
-    private TelegramResponse chapterHistoryLegacy(long chatId, String args) {
-        long[] values = twoLongs(args, "Пример: /chapter_history <novel_id> <chapter_id>");
-        return chapterHistory(chatId, values[0], values[1], null);
-    }
-
-    private TelegramResponse continueChapterLegacy(long chatId, String args) {
-        long[] values = twoLongs(args, "Пример: /continue_chapter <novel_id> <chapter_id>");
-        LlmRequest request = llmRequestService.continueChapter(chatId, values[0], values[1]);
-        return TelegramResponse.of(TelegramAction.send(chatId, accepted(request), List.of()));
-    }
-
-    private TelegramResponse adviceLegacy(long chatId, String args) {
-        String[] parts = splitWhitespace(args, 2, "Пример: /advice <novel_id> <вопрос>");
-        long novelId = parseLong(parts[0], "Идентификатор произведения указан неверно.");
-        validateText(parts[1], "Вопрос к LLM", 1000);
-        LlmRequest request = llmRequestService.advice(chatId, novelId, parts[1]);
-        return TelegramResponse.of(TelegramAction.send(chatId, accepted(request), List.of()));
-    }
-
-    private TelegramResponse draftLegacy(long chatId, String args) {
-        String[] parts = splitWhitespace(args, 2, "Пример: /draft <novel_id> <запрос>");
-        long novelId = parseLong(parts[0], "Идентификатор произведения указан неверно.");
-        validateText(parts[1], "Запрос к LLM", 1000);
-        LlmRequest request = llmRequestService.draft(chatId, novelId, parts[1]);
-        return TelegramResponse.of(TelegramAction.send(chatId, accepted(request), List.of()));
     }
 
     private String accepted(LlmRequest request) {
@@ -780,6 +791,22 @@ public class CommandRouter {
         }
     }
 
+    private void requireNovelOwner(long chatId, long novelId) {
+        boolean owner = novelService.listAuthors(chatId, novelId).stream()
+                .anyMatch(author -> author.chatId() == chatId && author.authorType() == AuthorType.OWNER);
+        if (!owner) {
+            throw new AccessDeniedException("Действие доступно только владельцу произведения.");
+        }
+    }
+
+    private AuthorType authorType(String value) {
+        try {
+            return AuthorType.valueOf(value == null ? "" : value.trim().toUpperCase());
+        } catch (RuntimeException ex) {
+            throw new UsageException("Некорректная роль участника.");
+        }
+    }
+
     private ParsedCommand parse(String text) {
         String normalized = text == null ? "" : text.trim();
         if (normalized.isBlank()) {
@@ -796,16 +823,6 @@ public class CommandRouter {
         return text != null && text.trim().startsWith("/");
     }
 
-    private String[] pipeArgs(String args, int expected, String usage) {
-        String[] parts = Arrays.stream(args.split("\\|", expected))
-                .map(String::trim)
-                .toArray(String[]::new);
-        if (parts.length < expected || Arrays.stream(parts).anyMatch(String::isBlank)) {
-            throw new UsageException(usage);
-        }
-        return parts;
-    }
-
     private String[] splitWhitespace(String args, int expected, String usage) {
         String[] parts = args.trim().split("\\s+", expected);
         if (parts.length < expected || Arrays.stream(parts).anyMatch(String::isBlank)) {
@@ -817,14 +834,6 @@ public class CommandRouter {
     private long singleLong(String args, String usage) {
         String[] parts = splitWhitespace(args, 1, usage);
         return parseLong(parts[0], "Идентификатор указан неверно.");
-    }
-
-    private long[] twoLongs(String args, String usage) {
-        String[] parts = splitWhitespace(args, 2, usage);
-        return new long[]{
-                parseLong(parts[0], "Идентификатор произведения указан неверно."),
-                parseLong(parts[1], "Идентификатор главы, пользователя или запроса указан неверно.")
-        };
     }
 
     private long parseLong(String value, String error) {

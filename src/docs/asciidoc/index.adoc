@@ -27,3 +27,23 @@ include::{snippets}/users-success/response-fields.adoc[]
 include::{snippets}/users-forbidden/http-request.adoc[]
 include::{snippets}/users-forbidden/http-response.adoc[]
 include::{snippets}/users-forbidden/response-fields.adoc[]
+
+== GET /admin
+
+HTML-панель администратора. Панель запрашивает `X-Admin-Token` и вызывает защищенные JSON endpoint-ы.
+
+== Admin JSON API
+
+Все endpoint-ы требуют заголовок `X-Admin-Token`.
+
+* `GET /admin/api/overview` — агрегированная статистика пользователей, романов, глав, участников и LLM-запросов.
+* `GET /admin/api/users` — пользователи, роли и количество доступных романов.
+* `GET /admin/api/novels` — романы, число авторов, глав и объем текста.
+* `GET /admin/api/llm-requests` — последние LLM-запросы и ошибки.
+
+== Mini App LLM API
+
+Все endpoint-ы требуют заголовок `X-Telegram-Init-Data`.
+
+* `POST /mini/api/chapters/{novelId}/{chapterId}/llm` — создает LLM-запрос из Web-редактора.
+* `GET /mini/api/llm/{requestId}` — возвращает статус и результат LLM-запроса.

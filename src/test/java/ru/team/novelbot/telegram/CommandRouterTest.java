@@ -9,6 +9,7 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import ru.team.novelbot.config.AppProperties;
 import ru.team.novelbot.db.DatabaseInitializer;
+import ru.team.novelbot.domain.AuthorType;
 import ru.team.novelbot.rabbit.LlmTaskPublisher;
 import ru.team.novelbot.repository.ChapterRepository;
 import ru.team.novelbot.repository.LlmRequestRepository;
@@ -92,20 +93,7 @@ class CommandRouterTest {
         userAuthService.registerOrUpdate(100, "writer", "Writer");
         var novel = novelService.createNovel(100, "City", "Story", "fantasy");
         var chapter = chapterService.addChapter(100, novel.id(), "Start", "Text");
-        TelegramInboundMessage callback = new TelegramInboundMessage(
-                TelegramUpdateType.CALLBACK,
-                100,
-                "writer",
-                "Writer",
-                null,
-                false,
-                "callback-id",
-                55,
-                "chapter:" + novel.id() + ":" + chapter.id(),
-                null,
-                null,
-                null
-        );
+        TelegramInboundMessage callback = callback(100, "writer", "Writer", "chapter:" + novel.id() + ":" + chapter.id());
 
         TelegramResponse response = router.route(callback);
 
@@ -117,8 +105,63 @@ class CommandRouterTest {
                 button.webAppUrl() != null && button.webAppUrl().contains("novelId=" + novel.id()));
     }
 
+    @Test
+    void ownerAddsAuthorThroughButtons() {
+        userAuthService.registerOrUpdate(100, "owner", "Owner");
+        userAuthService.registerOrUpdate(200, "owner2", "Owner Two");
+        var novel = novelService.createNovel(100, "City", "Story", "fantasy");
+
+        TelegramResponse authors = router.route(callback(100, "owner", "Owner", "authors:" + novel.id()));
+        TelegramAction edit = authors.actions().stream()
+                .filter(action -> action.type() == TelegramActionType.EDIT_MESSAGE)
+                .findFirst()
+                .orElseThrow();
+        assertThat(flatButtons(edit.keyboard())).anyMatch(button -> "Добавить владельца".equals(button.text()));
+
+        router.route(callback(100, "owner", "Owner", "author:add:" + novel.id() + ":OWNER"));
+        assertThat(sessionRepository.findByChatId(100)).hasValueSatisfying(session ->
+                assertThat(session.state()).isEqualTo("ADD_AUTHOR"));
+
+        router.route(TelegramInboundMessage.text(100, "owner", "Owner", "200"));
+
+        assertThat(novelService.listAuthors(100, novel.id())).anySatisfy(author -> {
+            assertThat(author.chatId()).isEqualTo(200);
+            assertThat(author.authorType()).isEqualTo(AuthorType.OWNER);
+        });
+    }
+
+    @Test
+    void ownerDeletesNovelThroughConfirmationButton() {
+        userAuthService.registerOrUpdate(100, "owner", "Owner");
+        var novel = novelService.createNovel(100, "City", "Story", "fantasy");
+
+        TelegramResponse ask = router.route(callback(100, "owner", "Owner", "delnovel:" + novel.id()));
+        assertThat(ask.actions()).anyMatch(action -> action.text().contains("Удалить роман"));
+
+        router.route(callback(100, "owner", "Owner", "delnovel:" + novel.id() + ":confirm"));
+
+        assertThat(novelService.listAccessible(100)).isEmpty();
+    }
+
     private List<TelegramButton> flatButtons(List<List<TelegramButton>> keyboard) {
         return keyboard.stream().flatMap(List::stream).toList();
+    }
+
+    private TelegramInboundMessage callback(long chatId, String username, String displayName, String data) {
+        return new TelegramInboundMessage(
+                TelegramUpdateType.CALLBACK,
+                chatId,
+                username,
+                displayName,
+                null,
+                false,
+                "callback-id",
+                55,
+                data,
+                null,
+                null,
+                null
+        );
     }
 
     private DataSource dataSource() {

@@ -14,10 +14,13 @@ import org.springframework.transaction.support.TransactionTemplate;
 import ru.team.novelbot.config.AppProperties;
 import ru.team.novelbot.db.DatabaseInitializer;
 import ru.team.novelbot.repository.ChapterRepository;
+import ru.team.novelbot.repository.LlmRequestRepository;
 import ru.team.novelbot.repository.NovelRepository;
 import ru.team.novelbot.repository.UserRepository;
 import ru.team.novelbot.service.AccessControlService;
+import ru.team.novelbot.service.AdminStatsService;
 import ru.team.novelbot.service.ChapterService;
+import ru.team.novelbot.service.LlmRequestService;
 import ru.team.novelbot.service.NovelService;
 import ru.team.novelbot.service.UserAuthService;
 import ru.team.novelbot.telegram.MiniAppAuthService;
@@ -47,6 +50,7 @@ class HttpRoutesRestDocsTest {
     private NovelService novelService;
     private ChapterService chapterService;
     private AppProperties properties;
+    private ObjectMapper objectMapper;
 
     @BeforeEach
     void setUp(RestDocumentationContextProvider restDocumentation) {
@@ -54,10 +58,11 @@ class HttpRoutesRestDocsTest {
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
         new DatabaseInitializer(jdbcTemplate).initialize();
         properties = testProperties();
-        ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
+        objectMapper = new ObjectMapper().findAndRegisterModules();
         UserRepository userRepository = new UserRepository(jdbcTemplate);
         NovelRepository novelRepository = new NovelRepository(jdbcTemplate);
         ChapterRepository chapterRepository = new ChapterRepository(jdbcTemplate);
+        LlmRequestRepository llmRequestRepository = new LlmRequestRepository(jdbcTemplate);
         AccessControlService accessControlService = new AccessControlService(novelRepository);
         userAuthService = new UserAuthService(userRepository, properties);
         chapterService = new ChapterService(
@@ -73,10 +78,21 @@ class HttpRoutesRestDocsTest {
                 accessControlService,
                 new TransactionTemplate(new DataSourceTransactionManager(dataSource))
         );
+        LlmRequestService llmRequestService = new LlmRequestService(
+                properties,
+                novelRepository,
+                chapterRepository,
+                llmRequestRepository,
+                accessControlService,
+                task -> {
+                }
+        );
         HttpRoutes routes = new HttpRoutes(
                 properties,
                 userAuthService,
                 chapterService,
+                llmRequestService,
+                new AdminStatsService(jdbcTemplate),
                 new MiniAppAuthService(properties, objectMapper),
                 objectMapper
         );
@@ -145,7 +161,39 @@ class HttpRoutesRestDocsTest {
                 .uri("/mini/chapter-editor")
                 .exchange()
                 .expectStatus().isOk()
-                .expectHeader().contentTypeCompatibleWith("text/html");
+                .expectHeader().contentTypeCompatibleWith("text/html")
+                .expectBody(String.class)
+                .consumeWith(result -> assertThat(result.getResponseBody()).contains("Продолжить главу"));
+    }
+
+    @Test
+    void servesAdminPanelHtml() {
+        webTestClient.get()
+                .uri("/admin")
+                .exchange()
+                .expectStatus().isOk()
+                .expectHeader().contentTypeCompatibleWith("text/html")
+                .expectBody(String.class)
+                .consumeWith(result -> assertThat(result.getResponseBody()).contains("Админ-панель бота"));
+    }
+
+    @Test
+    void protectsAdminApiAndReturnsOverview() {
+        userAuthService.registerOrUpdate(100, "owner", "Owner");
+        novelService.createNovel(100, "City", "Story", "fantasy");
+
+        webTestClient.get()
+                .uri("/admin/api/overview")
+                .exchange()
+                .expectStatus().isForbidden();
+
+        webTestClient.get()
+                .uri("/admin/api/overview")
+                .header("X-Admin-Token", "secret")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class)
+                .consumeWith(result -> assertThat(result.getResponseBody()).contains("\"users\":1", "\"novels\":1"));
     }
 
     @Test
@@ -188,6 +236,35 @@ class HttpRoutesRestDocsTest {
                 .getResponseBody();
         assertThat(saved).contains("\"title\":\"Renamed\"");
         assertThat(saved).contains("\"text\":\"Updated text\"");
+    }
+
+    @Test
+    void miniApiCreatesAndLoadsLlmRequest() throws Exception {
+        userAuthService.registerOrUpdate(100, "owner", "Owner");
+        var novel = novelService.createNovel(100, "City", "Story", "fantasy");
+        var chapter = chapterService.addChapter(100, novel.id(), "Start", "Original text");
+        String initData = signedInitData(100);
+
+        String created = webTestClient.post()
+                .uri("/mini/api/chapters/{novelId}/{chapterId}/llm", novel.id(), chapter.id())
+                .header("X-Telegram-Init-Data", initData)
+                .bodyValue(Map.of("type", "ADVICE", "prompt", "Что усилить в сцене?"))
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class)
+                .returnResult()
+                .getResponseBody();
+
+        assertThat(created).contains("\"request_type\":\"ADVICE\"", "\"status\":\"QUEUED\"");
+        long requestId = objectMapper.readTree(created).path("id").asLong();
+
+        webTestClient.get()
+                .uri("/mini/api/llm/{requestId}", requestId)
+                .header("X-Telegram-Init-Data", initData)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class)
+                .consumeWith(result -> assertThat(result.getResponseBody()).contains("\"id\":" + requestId));
     }
 
     private DataSource dataSource() {

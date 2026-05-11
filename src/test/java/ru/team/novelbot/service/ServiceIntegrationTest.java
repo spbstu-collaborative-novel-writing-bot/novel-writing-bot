@@ -95,6 +95,53 @@ class ServiceIntegrationTest {
     }
 
     @Test
+    void managesAdditionalOwnersAndCoAuthors() {
+        userAuthService.registerOrUpdate(100, "owner", "Owner");
+        userAuthService.registerOrUpdate(200, "owner2", "Owner Two");
+        userAuthService.registerOrUpdate(300, "coauthor", "Co Author");
+        var novel = novelService.createNovel(100, "Город", "История города", "фантастика");
+
+        novelService.addAuthor(100, novel.id(), 200, AuthorType.OWNER);
+        novelService.addAuthor(200, novel.id(), 300, AuthorType.CO_AUTHOR);
+
+        assertThat(novelRepository.findAuthorType(novel.id(), 200)).contains(AuthorType.OWNER);
+        assertThat(novelRepository.findAuthorType(novel.id(), 300)).contains(AuthorType.CO_AUTHOR);
+        assertThat(novelService.getDetails(300, novel.id()).novel().title()).isEqualTo("Город");
+    }
+
+    @Test
+    void rejectsUnknownAndDuplicateAuthors() {
+        userAuthService.registerOrUpdate(100, "owner", "Owner");
+        userAuthService.registerOrUpdate(200, "coauthor", "Co Author");
+        var novel = novelService.createNovel(100, "Город", "История города", "фантастика");
+
+        novelService.addAuthor(100, novel.id(), 200, AuthorType.CO_AUTHOR);
+
+        assertThatThrownBy(() -> novelService.addAuthor(100, novel.id(), 999, AuthorType.CO_AUTHOR))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("не найден");
+        assertThatThrownBy(() -> novelService.addAuthor(100, novel.id(), 200, AuthorType.OWNER))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("уже добавлен");
+    }
+
+    @Test
+    void protectsLastOwnerAndAllowsAdditionalOwnerToDeleteNovel() {
+        userAuthService.registerOrUpdate(100, "owner", "Owner");
+        userAuthService.registerOrUpdate(200, "owner2", "Owner Two");
+        var novel = novelService.createNovel(100, "Город", "История города", "фантастика");
+
+        assertThatThrownBy(() -> novelService.removeAuthor(100, novel.id(), 100))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("Последнего владельца");
+
+        novelService.addAuthor(100, novel.id(), 200, AuthorType.OWNER);
+        novelService.deleteNovel(200, novel.id());
+
+        assertThat(novelRepository.exists(novel.id())).isFalse();
+    }
+
+    @Test
     void addsChapterToAccessibleNovel() {
         userAuthService.registerOrUpdate(100, "owner", "Owner");
         var novel = novelService.createNovel(100, "Город", "История города", "фантастика");

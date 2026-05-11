@@ -66,28 +66,31 @@ public class NovelService {
 
     public void deleteNovel(long chatId, long novelId) {
         accessControlService.requireOwner(novelId, chatId);
-        novelRepository.deleteByOwner(novelId, chatId);
+        novelRepository.delete(novelId);
     }
 
     public void inviteAuthor(long ownerChatId, long novelId, long invitedChatId) {
+        addAuthor(ownerChatId, novelId, invitedChatId, AuthorType.CO_AUTHOR);
+    }
+
+    public void addAuthor(long ownerChatId, long novelId, long invitedChatId, AuthorType authorType) {
         accessControlService.requireOwner(novelId, ownerChatId);
         userAuthService.findByChatId(invitedChatId)
                 .orElseThrow(() -> new AppException("Пользователь с указанным chat_id не найден. Он должен сначала запустить бота."));
         if (novelRepository.findAuthorType(novelId, invitedChatId).isPresent()) {
-            throw new AppException("Этот пользователь уже является автором произведения.");
+            throw new AppException("Этот пользователь уже добавлен к произведению.");
         }
-        novelRepository.addAuthor(novelId, invitedChatId, AuthorType.CO_AUTHOR);
+        novelRepository.addAuthor(novelId, invitedChatId, authorType);
     }
 
     public void removeAuthor(long ownerChatId, long novelId, long targetChatId) {
         accessControlService.requireOwner(novelId, ownerChatId);
-        if (novelRepository.isOwner(novelId, targetChatId)) {
-            throw new AppException("Владельца нельзя удалить из списка авторов.");
+        AuthorType authorType = novelRepository.findAuthorType(novelId, targetChatId)
+                .orElseThrow(() -> new AppException("Указанный пользователь не добавлен к этому произведению."));
+        if (authorType == AuthorType.OWNER && novelRepository.countAuthorsByType(novelId, AuthorType.OWNER) <= 1) {
+            throw new AppException("Последнего владельца произведения нельзя удалить.");
         }
-        if (novelRepository.findAuthorType(novelId, targetChatId).isEmpty()) {
-            throw new AppException("Указанный пользователь не является соавтором этого произведения.");
-        }
-        novelRepository.removeCoAuthor(novelId, targetChatId);
+        novelRepository.removeAuthor(novelId, targetChatId);
     }
 
     public List<NovelAuthor> listAuthors(long chatId, long novelId) {

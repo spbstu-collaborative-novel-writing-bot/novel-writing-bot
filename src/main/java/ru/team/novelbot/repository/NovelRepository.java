@@ -75,8 +75,8 @@ public class NovelRepository {
         );
     }
 
-    public void deleteByOwner(long novelId, long ownerChatId) {
-        jdbcTemplate.update("DELETE FROM novels WHERE id = ? AND owner_chat_id = ?", novelId, ownerChatId);
+    public void delete(long novelId) {
+        jdbcTemplate.update("DELETE FROM novels WHERE id = ?", novelId);
     }
 
     public boolean exists(long novelId) {
@@ -135,6 +135,16 @@ public class NovelRepository {
         ).stream().findFirst();
     }
 
+    public int countAuthorsByType(long novelId, AuthorType authorType) {
+        Integer count = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM novel_authors WHERE novel_id = ? AND author_type = ?",
+                Integer.class,
+                novelId,
+                authorType.name()
+        );
+        return count == null ? 0 : count;
+    }
+
     public List<NovelAuthor> findAuthors(long novelId) {
         return jdbcTemplate.query(
                 """
@@ -154,12 +164,11 @@ public class NovelRepository {
         );
     }
 
-    public void removeCoAuthor(long novelId, long chatId) {
+    public void removeAuthor(long novelId, long chatId) {
         jdbcTemplate.update(
-                "DELETE FROM novel_authors WHERE novel_id = ? AND chat_id = ? AND author_type = ?",
+                "DELETE FROM novel_authors WHERE novel_id = ? AND chat_id = ?",
                 novelId,
-                chatId,
-                AuthorType.CO_AUTHOR.name()
+                chatId
         );
     }
 
