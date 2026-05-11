@@ -10,6 +10,8 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HexFormat;
@@ -19,6 +21,9 @@ import java.util.Map;
 
 @Component
 public class MiniAppAuthService {
+    private static final Duration INIT_DATA_MAX_AGE = Duration.ofHours(24);
+    private static final Duration INIT_DATA_FUTURE_SKEW = Duration.ofMinutes(5);
+
     private final AppProperties properties;
     private final ObjectMapper objectMapper;
 
@@ -37,6 +42,7 @@ public class MiniAppAuthService {
             if (hash == null || hash.isBlank()) {
                 throw new AccessDeniedException("Не передана подпись Telegram Mini App.");
             }
+            validateAuthDate(values.get("auth_date"));
             List<String> pairs = new ArrayList<>();
             values.entrySet().stream()
                     .sorted(Map.Entry.comparingByKey())
@@ -57,6 +63,25 @@ public class MiniAppAuthService {
             throw ex;
         } catch (Exception ex) {
             throw new AccessDeniedException("Не удалось проверить Telegram Mini App.");
+        }
+    }
+
+    private void validateAuthDate(String value) {
+        if (value == null || value.isBlank()) {
+            throw new AccessDeniedException("Не передана дата авторизации Telegram Mini App.");
+        }
+        Instant authDate;
+        try {
+            authDate = Instant.ofEpochSecond(Long.parseLong(value));
+        } catch (NumberFormatException ex) {
+            throw new AccessDeniedException("Дата авторизации Telegram Mini App неверна.");
+        }
+        Instant now = Instant.now();
+        if (authDate.isBefore(now.minus(INIT_DATA_MAX_AGE))) {
+            throw new AccessDeniedException("Данные Telegram Mini App устарели.");
+        }
+        if (authDate.isAfter(now.plus(INIT_DATA_FUTURE_SKEW))) {
+            throw new AccessDeniedException("Дата авторизации Telegram Mini App находится в будущем.");
         }
     }
 

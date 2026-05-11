@@ -20,7 +20,6 @@ import ru.team.novelbot.repository.UserRepository;
 import javax.sql.DataSource;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -46,8 +45,8 @@ class ServiceIntegrationTest {
         ChapterRepository chapterRepository = new ChapterRepository(jdbcTemplate);
         LlmRequestRepository llmRequestRepository = new LlmRequestRepository(jdbcTemplate);
         AccessControlService accessControlService = new AccessControlService(novelRepository);
-        userAuthService = new UserAuthService(userRepository, properties);
-        chapterService = new ChapterService(chapterRepository, novelRepository, accessControlService, transactionTemplate);
+        userAuthService = new UserAuthService(userRepository);
+        chapterService = new ChapterService(chapterRepository, novelRepository, userRepository, accessControlService, transactionTemplate);
         novelService = new NovelService(novelRepository, chapterRepository, userAuthService, accessControlService, transactionTemplate);
         publishedTasks = new ArrayList<>();
         LlmTaskPublisher publisher = publishedTasks::add;
@@ -167,6 +166,50 @@ class ServiceIntegrationTest {
     }
 
     @Test
+    void storesAllChapterVersionsAndBuildsDiff() {
+        userAuthService.registerOrUpdate(100, "owner", "Owner");
+        var novel = novelService.createNovel(100, "Город", "История города", "фантастика");
+        var chapter = chapterService.addChapter(100, novel.id(), "Версия 0", "Текст 0");
+
+        for (int i = 1; i <= 6; i++) {
+            chapterService.updateChapter(100, novel.id(), chapter.id(), "Версия " + i, "Текст " + i);
+        }
+
+        var history = chapterService.history(100, novel.id(), chapter.id());
+        assertThat(history).hasSize(6);
+
+        var page = chapterService.versions(100, novel.id(), chapter.id(), 0, 20);
+        assertThat(page.total()).isEqualTo(7);
+        assertThat(page.versions().getFirst().versionNumber()).isEqualTo(7);
+        assertThat(page.versions().getFirst().current()).isTrue();
+        assertThat(page.versions().getFirst().editorName()).isEqualTo("@owner");
+        assertThat(page.versions()).anySatisfy(version -> {
+            assertThat(version.versionNumber()).isEqualTo(1);
+            assertThat(version.title()).isEqualTo("Версия 0");
+            assertThat(version.text()).isEqualTo("Текст 0");
+        });
+
+        var firstDiff = chapterService.versionDiff(100, novel.id(), chapter.id(), 1);
+        assertThat(firstDiff.firstVersion()).isTrue();
+        assertThat(firstDiff.textFragments()).flatExtracting(fragment -> fragment.parts())
+                .anySatisfy(part -> {
+                    assertThat(part.type()).isEqualTo("added");
+                    assertThat(part.text()).contains("Текст 0");
+                });
+
+        var currentDiff = chapterService.versionDiff(100, novel.id(), chapter.id(), 7);
+        assertThat(currentDiff.textFragments()).flatExtracting(fragment -> fragment.parts())
+                .anySatisfy(part -> {
+                    assertThat(part.type()).isEqualTo("removed");
+                    assertThat(part.text()).contains("5");
+                })
+                .anySatisfy(part -> {
+                    assertThat(part.type()).isEqualTo("added");
+                    assertThat(part.text()).contains("6");
+                });
+    }
+
+    @Test
     void createsQueuedLlmRequestAndPublishesTask() {
         userAuthService.registerOrUpdate(100, "owner", "Owner");
         var novel = novelService.createNovel(100, "Город", "История города", "фантастика");
@@ -228,12 +271,11 @@ class ServiceIntegrationTest {
         return new AppProperties(
                 "telegram-token",
                 "",
-                Set.of(100L),
                 "secret",
                 8080,
                 new AppProperties.Database("localhost", 5432, "novelbot", "user", "password"),
                 new AppProperties.Rabbit("localhost", 5672, "guest", "guest", "llm.requests"),
-                new AppProperties.Llm("OPENAI_COMPATIBLE", "llm-key", "http://localhost/llm", "test-model", "", "GIGACHAT_API_PERS", "http://localhost/oauth"),
+                new AppProperties.Llm("OPENAI_COMPATIBLE", "llm-key", "http://localhost/llm", "test-model", "", "GIGACHAT_API_PERS", "http://localhost/oauth", "", true),
                 List.of("Гвоздева Е.", "Крутиков Д.", "Михайлова А.", "Романова А.")
         );
     }

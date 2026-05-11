@@ -172,15 +172,6 @@ public class NovelRepository {
         );
     }
 
-    public int countChapters(long novelId) {
-        Integer count = jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM chapters WHERE novel_id = ?",
-                Integer.class,
-                novelId
-        );
-        return count == null ? 0 : count;
-    }
-
     private RowMapper<Novel> novelMapper() {
         return (rs, rowNum) -> new Novel(
                 rs.getLong("id"),

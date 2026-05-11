@@ -28,8 +28,8 @@ public class ChapterRepository {
         jdbcTemplate.update(connection -> {
             PreparedStatement ps = connection.prepareStatement(
                     """
-                    INSERT INTO chapters(novel_id, title, text, order_number, last_editor_chat_id)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO chapters(novel_id, title, text, order_number, created_by_chat_id, last_editor_chat_id)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     new String[]{"id"}
             );
@@ -38,6 +38,7 @@ public class ChapterRepository {
             ps.setString(3, text);
             ps.setInt(4, orderNumber);
             ps.setLong(5, editorChatId);
+            ps.setLong(6, editorChatId);
             return ps;
         }, keyHolder);
         return keyHolder.getKey().longValue();
@@ -46,7 +47,8 @@ public class ChapterRepository {
     public List<Chapter> findByNovelId(long novelId) {
         return jdbcTemplate.query(
                 """
-                SELECT id, novel_id, title, text, order_number, created_at, updated_at, last_editor_chat_id
+                SELECT id, novel_id, title, text, order_number, created_at, updated_at,
+                       created_by_chat_id, last_editor_chat_id
                 FROM chapters
                 WHERE novel_id = ?
                 ORDER BY order_number, id
@@ -59,7 +61,8 @@ public class ChapterRepository {
     public Optional<Chapter> findByIdAndNovelId(long chapterId, long novelId) {
         return jdbcTemplate.query(
                 """
-                SELECT id, novel_id, title, text, order_number, created_at, updated_at, last_editor_chat_id
+                SELECT id, novel_id, title, text, order_number, created_at, updated_at,
+                       created_by_chat_id, last_editor_chat_id
                 FROM chapters
                 WHERE id = ? AND novel_id = ?
                 """,
@@ -80,7 +83,6 @@ public class ChapterRepository {
                 oldChapter.text(),
                 editorChatId
         );
-        trimHistory(oldChapter.id());
     }
 
     public void update(long chapterId, String title, String text, long editorChatId) {
@@ -130,7 +132,6 @@ public class ChapterRepository {
                 FROM chapter_history
                 WHERE chapter_id = ?
                 ORDER BY changed_at DESC, id DESC
-                LIMIT 5
                 """,
                 historyMapper(),
                 chapterId
@@ -146,17 +147,6 @@ public class ChapterRepository {
         return next == null ? 1 : next;
     }
 
-    private void trimHistory(long chapterId) {
-        List<Long> ids = jdbcTemplate.query(
-                "SELECT id FROM chapter_history WHERE chapter_id = ? ORDER BY changed_at DESC, id DESC",
-                (rs, rowNum) -> rs.getLong("id"),
-                chapterId
-        );
-        for (int i = 5; i < ids.size(); i++) {
-            jdbcTemplate.update("DELETE FROM chapter_history WHERE id = ?", ids.get(i));
-        }
-    }
-
     private RowMapper<Chapter> chapterMapper() {
         return (rs, rowNum) -> new Chapter(
                 rs.getLong("id"),
@@ -166,6 +156,7 @@ public class ChapterRepository {
                 rs.getInt("order_number"),
                 rs.getTimestamp("created_at").toLocalDateTime(),
                 rs.getTimestamp("updated_at").toLocalDateTime(),
+                rs.getLong("created_by_chat_id"),
                 rs.getLong("last_editor_chat_id")
         );
     }

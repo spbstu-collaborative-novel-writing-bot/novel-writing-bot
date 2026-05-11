@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <title>Редактор главы</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--tg-theme-bg-color, #ffffff);
+      color: var(--tg-theme-text-color, #111111);
+    }
+    body { margin: 0; padding: 16px; }
+    main { display: grid; gap: 12px; max-width: 1040px; margin: 0 auto; }
+    input, textarea, button {
+      font: inherit;
+      border: 1px solid var(--tg-theme-hint-color, #b7b7b7);
+      border-radius: 8px;
+      background: var(--tg-theme-secondary-bg-color, #f5f5f5);
+      color: var(--tg-theme-text-color, #111111);
+    }
+    input { padding: 10px 12px; }
+    textarea { min-height: 58vh; padding: 12px; resize: vertical; line-height: 1.5; }
+    button { padding: 10px 12px; cursor: pointer; }
+    button.primary { background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #ffffff); border-color: transparent; }
+    button:disabled { opacity: 0.55; cursor: default; }
+    h1 { font-size: 20px; line-height: 1.25; margin: 4px 0; }
+    .bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .editor-toolbar {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      padding: 8px 0;
+      background: var(--tg-theme-bg-color, #ffffff);
+    }
+    .view { display: grid; gap: 12px; }
+    .hidden { display: none; }
+    .llm, .version-item, .diff-block {
+      display: grid;
+      gap: 10px;
+      border: 1px solid var(--tg-theme-hint-color, #b7b7b7);
+      border-radius: 8px;
+      padding: 12px;
+      background: var(--tg-theme-secondary-bg-color, #f5f5f5);
+    }
+    .llm textarea { min-height: 92px; background: var(--tg-theme-bg-color, #ffffff); }
+    .llm-result { min-height: 140px; }
+    .status, .meta { color: var(--tg-theme-hint-color, #707579); }
+    .danger { color: var(--tg-theme-destructive-text-color, #d14); }
+    .version-list { display: grid; gap: 8px; }
+    .version-item a {
+      color: var(--tg-theme-link-color, #2481cc);
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .diff-line { line-height: 1.7; white-space: normal; overflow-wrap: anywhere; }
+    .diff-line strong {
+      font-weight: 800;
+      background: color-mix(in srgb, var(--tg-theme-button-color, #2481cc) 18%, transparent);
+      padding: 1px 3px;
+      border-radius: 4px;
+    }
+    .diff-line del {
+      color: var(--tg-theme-destructive-text-color, #d14);
+      text-decoration-thickness: 2px;
+      padding: 1px 3px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <div class="bar editor-toolbar">
+    <button class="primary" id="save">Сохранить</button>
+    <button id="download">Скачать .txt</button>
+    <button id="reload">Перезагрузить</button>
+    <button id="openEditor">Редактор</button>
+    <button id="openHistory">История</button>
+    <span class="status" id="counter"></span>
+  </div>
+
+  <section class="view" id="editorView">
+    <input id="title" maxlength="100" placeholder="Название главы">
+    <textarea id="text" placeholder="Текст главы"></textarea>
+    <section class="llm">
+      <div class="bar">
+        <button id="llmContinue">Продолжить главу</button>
+        <button id="llmAdvice">Совет</button>
+        <button id="llmDraft">Черновик</button>
+        <button id="llmRefresh">Проверить статус</button>
+        <button class="primary" id="llmInsert">Вставить результат</button>
+      </div>
+      <textarea id="llmPrompt" maxlength="1000" placeholder="Вопрос или запрос для совета и черновика"></textarea>
+      <textarea class="llm-result" id="llmResult" readonly placeholder="Результат LLM появится здесь"></textarea>
+      <div class="status" id="llmStatus"></div>
+    </section>
+  </section>
+
+  <section class="view hidden" id="historyView">
+    <h1>История версий</h1>
+    <div class="version-list" id="versionList"></div>
+    <div class="bar">
+      <button id="prevVersions">Назад</button>
+      <button id="nextVersions">Вперед</button>
+      <span class="status" id="historyStatus"></span>
+    </div>
+  </section>
+
+  <section class="view hidden" id="diffView">
+    <h1 id="diffTitle">Изменения версии</h1>
+    <div class="meta" id="diffMeta"></div>
+    <div class="diff-block hidden" id="titleDiffBlock">
+      <strong>Название</strong>
+      <div class="diff-line" id="titleDiff"></div>
+    </div>
+    <div class="diff-block" id="textDiffBlock">
+      <strong>Текст</strong>
+      <div id="textDiff"></div>
+    </div>
+  </section>
+
+  <div class="status" id="status"></div>
+</main>
+<script>
+  const FRIENDLY_LLM_ERROR = 'Упс... LLM сейчас недоступен. Попробуйте позже.';
+  const tg = window.Telegram?.WebApp;
+  tg?.ready();
+  tg?.expand();
+
+  const params = new URLSearchParams(location.search);
+  const view = params.get('view') || 'editor';
+  const novelId = params.get('novelId');
+  const chapterId = params.get('chapterId');
+  const initData = tg?.initData || '';
+  const title = document.getElementById('title');
+  const text = document.getElementById('text');
+  const counter = document.getElementById('counter');
+  const statusEl = document.getElementById('status');
+  const saveButton = document.getElementById('save');
+  const llmPrompt = document.getElementById('llmPrompt');
+  const llmResult = document.getElementById('llmResult');
+  const llmStatus = document.getElementById('llmStatus');
+  const historyStatus = document.getElementById('historyStatus');
+  const versionList = document.getElementById('versionList');
+  let updatedAt = null;
+  let dirtyDraft = '';
+  let currentLlmId = null;
+  let historyPage = 0;
+  const historySize = 20;
+
+  function headers() {
+    return {'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData};
+  }
+
+  function urlFor(nextView, extra = {}) {
+    const next = new URLSearchParams({novelId, chapterId});
+    if (nextView && nextView !== 'editor') next.set('view', nextView);
+    Object.entries(extra).forEach(([key, value]) => next.set(key, value));
+    return `/mini/chapter-editor?${next.toString()}`;
+  }
+
+  function showView(name) {
+    document.getElementById('editorView').classList.toggle('hidden', name !== 'editor');
+    document.getElementById('historyView').classList.toggle('hidden', name !== 'history');
+    document.getElementById('diffView').classList.toggle('hidden', name !== 'diff');
+    saveButton.classList.toggle('hidden', name !== 'editor');
+    document.getElementById('download').classList.toggle('hidden', name !== 'editor');
+    document.getElementById('reload').classList.toggle('hidden', name !== 'editor');
+    counter.classList.toggle('hidden', name !== 'editor');
+  }
+
+  function count() {
+    const words = text.value.trim() ? text.value.trim().split(/\s+/).length : 0;
+    counter.textContent = `${words} слов, ${text.value.length} символов`;
+    dirtyDraft = text.value;
+  }
+
+  async function load() {
+    statusEl.textContent = 'Загрузка...';
+    const res = await fetch(`/mini/api/chapters/${novelId}/${chapterId}`, {headers: headers()});
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    title.value = data.title;
+    text.value = data.text;
+    updatedAt = data.updated_at;
+    statusEl.textContent = 'Глава загружена';
+    count();
+  }
+
+  async function save() {
+    statusEl.textContent = 'Сохранение...';
+    const res = await fetch(`/mini/api/chapters/${novelId}/${chapterId}`, {
+      method: 'PUT',
+      headers: headers(),
+      body: JSON.stringify({title: title.value, text: text.value, updated_at: updatedAt})
+    });
+    if (res.status === 409) {
+      statusEl.innerHTML = '<span class="danger">Глава изменилась у другого автора. Скачайте черновик или перезагрузите актуальную версию.</span>';
+      return;
+    }
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    updatedAt = data.updated_at;
+    statusEl.textContent = 'Сохранено';
+    tg?.HapticFeedback?.notificationOccurred('success');
+  }
+
+  function download() {
+    const blob = new Blob([dirtyDraft || text.value], {type: 'text/plain;charset=utf-8'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${title.value || 'chapter'}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function loadHistory() {
+    historyStatus.textContent = 'Загрузка...';
+    const res = await fetch(`/mini/api/chapters/${novelId}/${chapterId}/versions?page=${historyPage}&size=${historySize}`, {headers: headers()});
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    renderVersions(data);
+  }
+
+  function renderVersions(data) {
+    versionList.replaceChildren();
+    data.versions.forEach(version => {
+      const item = document.createElement('div');
+      item.className = 'version-item';
+      const link = document.createElement('a');
+      link.href = urlFor('diff', {version: version.version_number});
+      link.textContent = `Версия ${version.version_number}${version.is_current ? ' · текущая' : ''}`;
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = `${formatDate(version.changed_at)} · ${version.editor_name}`;
+      item.append(link, meta);
+      versionList.append(item);
+    });
+    const shownFrom = data.total === 0 ? 0 : data.page * data.size + 1;
+    const shownTo = Math.min(data.total, (data.page + 1) * data.size);
+    historyStatus.textContent = `${shownFrom}-${shownTo} из ${data.total}`;
+    document.getElementById('prevVersions').disabled = data.page <= 0;
+    document.getElementById('nextVersions').disabled = shownTo >= data.total;
+  }
+
+  async function loadDiff() {
+    const version = params.get('version');
+    statusEl.textContent = 'Загрузка...';
+    const res = await fetch(`/mini/api/chapters/${novelId}/${chapterId}/versions/${version}/diff`, {headers: headers()});
+    if (!res.ok) throw new Error(await res.text());
+    renderDiff(await res.json());
+    statusEl.textContent = '';
+  }
+
+  function renderDiff(data) {
+    document.getElementById('diffTitle').textContent = data.is_first_version
+      ? 'Версия 1 · первая версия'
+      : `Изменения версии ${data.version_number}`;
+    document.getElementById('diffMeta').textContent = `${formatDate(data.changed_at)} · ${data.editor_name}`;
+    const titleBlock = document.getElementById('titleDiffBlock');
+    titleBlock.classList.toggle('hidden', !data.title_changed);
+    renderFragments(document.getElementById('titleDiff'), data.title_fragments);
+    const textDiff = document.getElementById('textDiff');
+    renderFragments(textDiff, data.text_fragments);
+    if (!data.text_fragments.length) {
+      textDiff.textContent = data.title_changed ? 'Текст не изменился.' : 'Изменений в тексте нет.';
+    }
+  }
+
+  function renderFragments(target, fragments) {
+    target.replaceChildren();
+    fragments.forEach(fragment => {
+      const line = document.createElement('div');
+      line.className = 'diff-line';
+      fragment.parts.forEach(part => {
+        const element = part.type === 'added'
+          ? document.createElement('strong')
+          : part.type === 'removed'
+            ? document.createElement('del')
+            : document.createElement('span');
+        element.textContent = part.text;
+        line.append(element, document.createTextNode(' '));
+      });
+      target.append(line);
+    });
+  }
+
+  function formatDate(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  }
+
+  async function createLlm(type) {
+    const prompt = llmPrompt.value.trim();
+    if (type !== 'CONTINUE_CHAPTER' && !prompt) {
+      llmStatus.textContent = 'Введите вопрос или запрос.';
+      return;
+    }
+    llmStatus.textContent = 'LLM-запрос отправляется...';
+    const res = await fetch(`/mini/api/chapters/${novelId}/${chapterId}/llm`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({type, prompt})
+    });
+    if (!res.ok) throw new Error(FRIENDLY_LLM_ERROR);
+    renderLlm(await res.json());
+  }
+
+  async function refreshLlm() {
+    if (!currentLlmId) {
+      llmStatus.textContent = 'Сначала отправьте LLM-запрос.';
+      return;
+    }
+    const res = await fetch(`/mini/api/llm/${currentLlmId}`, {headers: headers()});
+    if (!res.ok) throw new Error(FRIENDLY_LLM_ERROR);
+    renderLlm(await res.json());
+  }
+
+  function renderLlm(data) {
+    currentLlmId = data.id;
+    if (data.status === 'DONE') {
+      llmResult.value = data.result || '';
+      llmStatus.textContent = `LLM-запрос #${data.id} готов`;
+      tg?.HapticFeedback?.notificationOccurred('success');
+      return;
+    }
+    if (data.status === 'ERROR') {
+      llmStatus.textContent = FRIENDLY_LLM_ERROR;
+      return;
+    }
+    llmStatus.textContent = `LLM-запрос #${data.id}: ${data.status}`;
+    setTimeout(() => refreshLlm().catch(() => llmStatus.textContent = FRIENDLY_LLM_ERROR), 2500);
+  }
+
+  function insertLlmResult() {
+    if (!llmResult.value.trim()) {
+      llmStatus.textContent = 'Нет результата для вставки.';
+      return;
+    }
+    const start = text.selectionStart ?? text.value.length;
+    const end = text.selectionEnd ?? text.value.length;
+    const before = text.value.slice(0, start);
+    const after = text.value.slice(end);
+    const addition = (before && !before.endsWith('\n') ? '\n\n' : '') + llmResult.value.trim() + (after && !after.startsWith('\n') ? '\n\n' : '');
+    text.value = before + addition + after;
+    text.focus();
+    text.selectionStart = text.selectionEnd = (before + addition).length;
+    count();
+    llmStatus.textContent = 'Результат вставлен в текст главы. Сохраните изменения.';
+  }
+
+  text.addEventListener('input', count);
+  title.addEventListener('input', count);
+  saveButton.addEventListener('click', () => save().catch(e => statusEl.textContent = e.message));
+  document.getElementById('download').addEventListener('click', download);
+  document.getElementById('reload').addEventListener('click', () => load().catch(e => statusEl.textContent = e.message));
+  document.getElementById('openEditor').addEventListener('click', () => location.href = urlFor('editor'));
+  document.getElementById('openHistory').addEventListener('click', () => location.href = urlFor('history'));
+  document.getElementById('prevVersions').addEventListener('click', () => {
+    historyPage = Math.max(0, historyPage - 1);
+    loadHistory().catch(e => historyStatus.textContent = e.message);
+  });
+  document.getElementById('nextVersions').addEventListener('click', () => {
+    historyPage++;
+    loadHistory().catch(e => historyStatus.textContent = e.message);
+  });
+  document.getElementById('llmContinue').addEventListener('click', () => createLlm('CONTINUE_CHAPTER').catch(() => llmStatus.textContent = FRIENDLY_LLM_ERROR));
+  document.getElementById('llmAdvice').addEventListener('click', () => createLlm('ADVICE').catch(() => llmStatus.textContent = FRIENDLY_LLM_ERROR));
+  document.getElementById('llmDraft').addEventListener('click', () => createLlm('DRAFT').catch(() => llmStatus.textContent = FRIENDLY_LLM_ERROR));
+  document.getElementById('llmRefresh').addEventListener('click', () => refreshLlm().catch(() => llmStatus.textContent = FRIENDLY_LLM_ERROR));
+  document.getElementById('llmInsert').addEventListener('click', insertLlmResult);
+
+  if (!novelId || !chapterId) {
+    statusEl.textContent = 'Откройте редактор из карточки конкретной главы в боте.';
+    title.disabled = true;
+    text.disabled = true;
+    saveButton.disabled = true;
+    document.querySelectorAll('button, #llmPrompt').forEach(item => item.disabled = true);
+  } else {
+    showView(view);
+    if (view === 'history') {
+      loadHistory().catch(e => historyStatus.textContent = e.message);
+    } else if (view === 'diff') {
+      loadDiff().catch(e => statusEl.textContent = e.message);
+    } else {
+      load().catch(e => statusEl.textContent = e.message);
+    }
+  }
+</script>
+</body>
+</html>

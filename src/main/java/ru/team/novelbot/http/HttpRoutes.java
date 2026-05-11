@@ -1,6 +1,6 @@
 package ru.team.novelbot.http;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -10,24 +10,29 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 import ru.team.novelbot.config.AppProperties;
-import ru.team.novelbot.domain.AppUser;
 import ru.team.novelbot.domain.Chapter;
+import ru.team.novelbot.domain.ChapterDiffFragment;
+import ru.team.novelbot.domain.ChapterDiffPart;
 import ru.team.novelbot.domain.ChapterEditResult;
+import ru.team.novelbot.domain.ChapterVersion;
+import ru.team.novelbot.domain.ChapterVersionDiff;
 import ru.team.novelbot.domain.LlmRequest;
+import ru.team.novelbot.domain.LlmRequestStatus;
 import ru.team.novelbot.domain.LlmRequestType;
-import ru.team.novelbot.service.AdminStatsService;
 import ru.team.novelbot.service.AccessDeniedException;
+import ru.team.novelbot.service.AdminNovelDeletionService;
+import ru.team.novelbot.service.AdminStatsService;
 import ru.team.novelbot.service.AppException;
 import ru.team.novelbot.service.ChapterService;
 import ru.team.novelbot.service.LlmRequestService;
 import ru.team.novelbot.service.TextTools;
 import ru.team.novelbot.service.UsageException;
-import ru.team.novelbot.service.UserAuthService;
 import ru.team.novelbot.telegram.MiniAppAuthService;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 
 import static org.springframework.web.reactive.function.server.RequestPredicates.GET;
@@ -36,43 +41,47 @@ import static org.springframework.web.reactive.function.server.RequestPredicates
 
 @Component
 public class HttpRoutes {
+    private static final String FRIENDLY_LLM_ERROR = "Упс... LLM сейчас недоступен. Попробуйте позже.";
+    private static final String ADMIN_HTML = "web/admin.html";
+    private static final String EDITOR_HTML = "web/mini-chapter-editor.html";
+
     private final AppProperties properties;
-    private final UserAuthService userAuthService;
     private final ChapterService chapterService;
     private final LlmRequestService llmRequestService;
     private final AdminStatsService adminStatsService;
+    private final AdminNovelDeletionService adminNovelDeletionService;
     private final MiniAppAuthService miniAppAuthService;
 
     public HttpRoutes(
             AppProperties properties,
-            UserAuthService userAuthService,
             ChapterService chapterService,
             LlmRequestService llmRequestService,
             AdminStatsService adminStatsService,
-            MiniAppAuthService miniAppAuthService,
-            ObjectMapper objectMapper
+            AdminNovelDeletionService adminNovelDeletionService,
+            MiniAppAuthService miniAppAuthService
     ) {
         this.properties = properties;
-        this.userAuthService = userAuthService;
         this.chapterService = chapterService;
         this.llmRequestService = llmRequestService;
         this.adminStatsService = adminStatsService;
+        this.adminNovelDeletionService = adminNovelDeletionService;
         this.miniAppAuthService = miniAppAuthService;
     }
 
     public RouterFunction<ServerResponse> routes() {
         return RouterFunctions.route(GET("/healthcheck"), this::healthcheck)
-                .andRoute(GET("/users"), this::users)
                 .andRoute(GET("/admin"), this::adminPanel)
                 .andRoute(GET("/admin/api/overview"), this::adminOverview)
                 .andRoute(GET("/admin/api/users"), this::adminUsers)
                 .andRoute(GET("/admin/api/novels"), this::adminNovels)
                 .andRoute(GET("/admin/api/llm-requests"), this::adminLlmRequests)
-                .andRoute(GET("/"), this::chapterEditor)
+                .andRoute(POST("/admin/api/novels/{novelId}/delete"), this::adminDeleteNovel)
                 .andRoute(GET("/mini/chapter-editor"), this::chapterEditor)
                 .andRoute(GET("/mini/api/chapters/{novelId}/{chapterId}"), this::miniGetChapter)
                 .andRoute(PUT("/mini/api/chapters/{novelId}/{chapterId}"), this::miniSaveChapter)
                 .andRoute(GET("/mini/api/chapters/{novelId}/{chapterId}/history"), this::miniChapterHistory)
+                .andRoute(GET("/mini/api/chapters/{novelId}/{chapterId}/versions"), this::miniChapterVersions)
+                .andRoute(GET("/mini/api/chapters/{novelId}/{chapterId}/versions/{versionNumber}/diff"), this::miniChapterVersionDiff)
                 .andRoute(POST("/mini/api/chapters/{novelId}/{chapterId}/llm"), this::miniCreateLlmRequest)
                 .andRoute(GET("/mini/api/llm/{requestId}"), this::miniLlmRequest);
     }
@@ -88,22 +97,8 @@ public class HttpRoutes {
                 ));
     }
 
-    private Mono<ServerResponse> users(ServerRequest request) {
-        if (!adminTokenValid(request)) {
-            return accessDenied();
-        }
-        List<Map<String, Object>> users = userAuthService.findAll().stream()
-                .map(this::toDto)
-                .toList();
-        return ServerResponse.ok()
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(users);
-    }
-
     private Mono<ServerResponse> adminPanel(ServerRequest request) {
-        return ServerResponse.ok()
-                .contentType(MediaType.TEXT_HTML)
-                .bodyValue(adminHtml());
+        return html(ADMIN_HTML);
     }
 
     private Mono<ServerResponse> adminOverview(ServerRequest request) {
@@ -134,10 +129,44 @@ public class HttpRoutes {
         return json(adminStatsService.llmRequests());
     }
 
+    private Mono<ServerResponse> adminDeleteNovel(ServerRequest request) {
+        if (!adminTokenValid(request)) {
+            return accessDenied();
+        }
+        long novelId;
+        try {
+            novelId = pathLong(request, "novelId");
+        } catch (RuntimeException ex) {
+            return error(HttpStatus.BAD_REQUEST, "Некорректный id произведения.");
+        }
+        return request.bodyToMono(Map.class)
+                .defaultIfEmpty(Map.of())
+                .flatMap(body -> {
+                    try {
+                        var result = adminNovelDeletionService.deleteNovel(novelId, value(body, "reason"));
+                        return json(Map.of(
+                                "deleted", true,
+                                "id", result.id(),
+                                "notified_authors", result.notifiedAuthors()
+                        ));
+                    } catch (AdminNovelDeletionService.NotificationFailedException ex) {
+                        return ServerResponse.status(HttpStatus.CONFLICT)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .bodyValue(Map.of(
+                                        "error", ex.getMessage(),
+                                        "failed_chat_ids", ex.failedChatIds()
+                                ));
+                    } catch (UsageException ex) {
+                        return error(HttpStatus.BAD_REQUEST, ex.getMessage());
+                    } catch (AppException ex) {
+                        return error(HttpStatus.NOT_FOUND, ex.getMessage());
+                    }
+                })
+                .onErrorResume(RuntimeException.class, ex -> error(HttpStatus.BAD_REQUEST, ex.getMessage()));
+    }
+
     private Mono<ServerResponse> chapterEditor(ServerRequest request) {
-        return ServerResponse.ok()
-                .contentType(MediaType.TEXT_HTML)
-                .bodyValue(editorHtml());
+        return html(EDITOR_HTML);
     }
 
     private Mono<ServerResponse> miniGetChapter(ServerRequest request) {
@@ -151,6 +180,8 @@ public class HttpRoutes {
                     .bodyValue(chapterDto(chapter));
         } catch (AccessDeniedException ex) {
             return error(HttpStatus.FORBIDDEN, ex.getMessage());
+        } catch (UsageException ex) {
+            return error(HttpStatus.BAD_REQUEST, ex.getMessage());
         } catch (AppException ex) {
             return error(HttpStatus.NOT_FOUND, ex.getMessage());
         }
@@ -164,10 +195,13 @@ public class HttpRoutes {
             return request.bodyToMono(Map.class)
                     .flatMap(body -> saveChapter(chatId, novelId, chapterId, body))
                     .onErrorResume(AccessDeniedException.class, ex -> error(HttpStatus.FORBIDDEN, ex.getMessage()))
+                    .onErrorResume(UsageException.class, ex -> error(HttpStatus.BAD_REQUEST, ex.getMessage()))
                     .onErrorResume(AppException.class, ex -> error(HttpStatus.BAD_REQUEST, ex.getMessage()))
                     .onErrorResume(IllegalArgumentException.class, ex -> error(HttpStatus.BAD_REQUEST, ex.getMessage()));
         } catch (AccessDeniedException ex) {
             return error(HttpStatus.FORBIDDEN, ex.getMessage());
+        } catch (UsageException ex) {
+            return error(HttpStatus.BAD_REQUEST, ex.getMessage());
         }
     }
 
@@ -227,6 +261,47 @@ public class HttpRoutes {
                     .bodyValue(history);
         } catch (AccessDeniedException ex) {
             return error(HttpStatus.FORBIDDEN, ex.getMessage());
+        } catch (UsageException ex) {
+            return error(HttpStatus.BAD_REQUEST, ex.getMessage());
+        } catch (AppException ex) {
+            return error(HttpStatus.NOT_FOUND, ex.getMessage());
+        }
+    }
+
+    private Mono<ServerResponse> miniChapterVersions(ServerRequest request) {
+        try {
+            long chatId = miniChatId(request);
+            long novelId = pathLong(request, "novelId");
+            long chapterId = pathLong(request, "chapterId");
+            int page = queryInt(request, "page", 0);
+            int size = queryInt(request, "size", 20);
+            var result = chapterService.versions(chatId, novelId, chapterId, page, size);
+            return json(Map.of(
+                    "page", result.page(),
+                    "size", result.size(),
+                    "total", result.total(),
+                    "versions", result.versions().stream().map(this::versionDto).toList()
+            ));
+        } catch (AccessDeniedException ex) {
+            return error(HttpStatus.FORBIDDEN, ex.getMessage());
+        } catch (UsageException ex) {
+            return error(HttpStatus.BAD_REQUEST, ex.getMessage());
+        } catch (AppException ex) {
+            return error(HttpStatus.NOT_FOUND, ex.getMessage());
+        }
+    }
+
+    private Mono<ServerResponse> miniChapterVersionDiff(ServerRequest request) {
+        try {
+            long chatId = miniChatId(request);
+            long novelId = pathLong(request, "novelId");
+            long chapterId = pathLong(request, "chapterId");
+            int versionNumber = pathInt(request, "versionNumber");
+            return json(diffDto(chapterService.versionDiff(chatId, novelId, chapterId, versionNumber)));
+        } catch (AccessDeniedException ex) {
+            return error(HttpStatus.FORBIDDEN, ex.getMessage());
+        } catch (UsageException ex) {
+            return error(HttpStatus.BAD_REQUEST, ex.getMessage());
         } catch (AppException ex) {
             return error(HttpStatus.NOT_FOUND, ex.getMessage());
         }
@@ -240,11 +315,12 @@ public class HttpRoutes {
             return request.bodyToMono(Map.class)
                     .flatMap(body -> createMiniLlmRequest(chatId, novelId, chapterId, body))
                     .onErrorResume(AccessDeniedException.class, ex -> error(HttpStatus.FORBIDDEN, ex.getMessage()))
+                    .onErrorResume(UsageException.class, ex -> error(HttpStatus.BAD_REQUEST, ex.getMessage()))
                     .onErrorResume(AppException.class, ex -> error(HttpStatus.BAD_REQUEST, ex.getMessage()))
                     .onErrorResume(IllegalArgumentException.class, ex -> error(HttpStatus.BAD_REQUEST, ex.getMessage()));
         } catch (AccessDeniedException ex) {
             return error(HttpStatus.FORBIDDEN, ex.getMessage());
-        } catch (RuntimeException ex) {
+        } catch (UsageException ex) {
             return error(HttpStatus.BAD_REQUEST, ex.getMessage());
         }
     }
@@ -273,10 +349,10 @@ public class HttpRoutes {
             return json(llmDto(llmRequestService.requestStatus(chatId, requestId)));
         } catch (AccessDeniedException ex) {
             return error(HttpStatus.FORBIDDEN, ex.getMessage());
+        } catch (UsageException ex) {
+            return error(HttpStatus.BAD_REQUEST, ex.getMessage());
         } catch (AppException ex) {
             return error(HttpStatus.NOT_FOUND, ex.getMessage());
-        } catch (RuntimeException ex) {
-            return error(HttpStatus.BAD_REQUEST, ex.getMessage());
         }
     }
 
@@ -285,7 +361,31 @@ public class HttpRoutes {
     }
 
     private long pathLong(ServerRequest request, String name) {
-        return Long.parseLong(request.pathVariable(name));
+        try {
+            return Long.parseLong(request.pathVariable(name));
+        } catch (NumberFormatException ex) {
+            throw new UsageException("Некорректный id.");
+        }
+    }
+
+    private int pathInt(ServerRequest request, String name) {
+        try {
+            return Integer.parseInt(request.pathVariable(name));
+        } catch (NumberFormatException ex) {
+            throw new UsageException("Некорректный номер версии.");
+        }
+    }
+
+    private int queryInt(ServerRequest request, String name, int defaultValue) {
+        return request.queryParam(name)
+                .map(value -> {
+                    try {
+                        return Integer.parseInt(value);
+                    } catch (NumberFormatException ex) {
+                        throw new UsageException("Некорректный параметр " + name + ".");
+                    }
+                })
+                .orElse(defaultValue);
     }
 
     private LlmRequestType llmType(String value) {
@@ -321,6 +421,43 @@ public class HttpRoutes {
         );
     }
 
+    private Map<String, Object> versionDto(ChapterVersion version) {
+        return Map.of(
+                "version_number", version.versionNumber(),
+                "chapter_id", version.chapterId(),
+                "title", version.title(),
+                "changed_at", version.changedAt().toString(),
+                "editor_chat_id", version.editorChatId(),
+                "editor_name", version.editorName(),
+                "is_current", version.current()
+        );
+    }
+
+    private Map<String, Object> diffDto(ChapterVersionDiff diff) {
+        return Map.of(
+                "version_number", diff.versionNumber(),
+                "previous_version_number", diff.previousVersionNumber(),
+                "is_current", diff.current(),
+                "is_first_version", diff.firstVersion(),
+                "changed_at", diff.changedAt().toString(),
+                "editor_name", diff.editorName(),
+                "title_changed", diff.titleChanged(),
+                "title_fragments", diff.titleFragments().stream().map(this::fragmentDto).toList(),
+                "text_fragments", diff.textFragments().stream().map(this::fragmentDto).toList()
+        );
+    }
+
+    private Map<String, Object> fragmentDto(ChapterDiffFragment fragment) {
+        return Map.of("parts", fragment.parts().stream().map(this::partDto).toList());
+    }
+
+    private Map<String, Object> partDto(ChapterDiffPart part) {
+        return Map.of(
+                "type", part.type(),
+                "text", part.text()
+        );
+    }
+
     private Map<String, Object> llmDto(LlmRequest request) {
         Map<String, Object> dto = new LinkedHashMap<>();
         dto.put("id", request.id());
@@ -330,7 +467,7 @@ public class HttpRoutes {
         dto.put("request_type", request.requestType().name());
         dto.put("status", request.status().name());
         dto.put("result", request.result() == null ? "" : request.result());
-        dto.put("error_message", request.errorMessage() == null ? "" : request.errorMessage());
+        dto.put("error_message", request.status() == LlmRequestStatus.ERROR ? FRIENDLY_LLM_ERROR : "");
         dto.put("provider", request.provider());
         dto.put("model", request.model());
         dto.put("created_at", request.createdAt().toString());
@@ -338,7 +475,6 @@ public class HttpRoutes {
         dto.put("completed_at", request.completedAt() == null ? "" : request.completedAt().toString());
         return dto;
     }
-
 
     private String value(Map<?, ?> body, String key) {
         Object value = body.get(key);
@@ -361,345 +497,17 @@ public class HttpRoutes {
                 .bodyValue(body);
     }
 
+    private Mono<ServerResponse> html(String path) {
+        try {
+            return ServerResponse.ok()
+                    .contentType(MediaType.TEXT_HTML)
+                    .bodyValue(new ClassPathResource(path).getContentAsString(StandardCharsets.UTF_8));
+        } catch (IOException ex) {
+            return error(HttpStatus.INTERNAL_SERVER_ERROR, "HTML resource is not available.");
+        }
+    }
+
     private boolean adminTokenValid(ServerRequest request) {
         return properties.httpAdminToken().equals(request.headers().firstHeader("X-Admin-Token"));
-    }
-
-    private Map<String, Object> toDto(AppUser user) {
-        return Map.of(
-                "chat_id", user.chatId(),
-                "username", user.username() == null ? "" : user.username(),
-                "role", user.role().displayName(),
-                "created_at", user.createdAt().toString()
-        );
-    }
-
-    private String adminHtml() {
-        return """
-                <!doctype html>
-                <html lang="ru">
-                <head>
-                  <meta charset="utf-8">
-                  <meta name="viewport" content="width=device-width, initial-scale=1">
-                  <title>Админ-панель бота</title>
-                  <style>
-                    :root { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17202a; background: #f4f7f9; }
-                    body { margin: 0; }
-                    main { max-width: 1180px; margin: 0 auto; padding: 20px; display: grid; gap: 16px; }
-                    h1, h2 { margin: 0; letter-spacing: 0; }
-                    h1 { font-size: 28px; }
-                    h2 { font-size: 18px; }
-                    .toolbar, section { background: #ffffff; border: 1px solid #d9e2e7; border-radius: 8px; padding: 14px; }
-                    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-                    input, button { font: inherit; border-radius: 8px; border: 1px solid #b9c7d1; padding: 9px 11px; }
-                    input { min-width: min(420px, 100%); flex: 1; }
-                    button { background: #1f6feb; color: white; border-color: #1f6feb; cursor: pointer; }
-                    button.secondary { background: #ffffff; color: #17202a; border-color: #b9c7d1; }
-                    .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
-                    .metric { border: 1px solid #d9e2e7; border-radius: 8px; padding: 12px; background: #fbfcfd; }
-                    .metric strong { display: block; font-size: 24px; }
-                    .status { color: #607080; }
-                    table { width: 100%; border-collapse: collapse; font-size: 14px; }
-                    th, td { border-bottom: 1px solid #e4ebf0; padding: 8px; text-align: left; vertical-align: top; }
-                    th { color: #405060; font-weight: 600; }
-                    .scroll { overflow-x: auto; }
-                  </style>
-                </head>
-                <body>
-                <main>
-                  <h1>Админ-панель бота</h1>
-                  <div class="toolbar">
-                    <input id="token" type="password" placeholder="X-Admin-Token">
-                    <button id="load">Обновить</button>
-                    <span class="status" id="status"></span>
-                  </div>
-                  <section>
-                    <h2>Статистика</h2>
-                    <div class="grid" id="overview"></div>
-                  </section>
-                  <section>
-                    <h2>Пользователи</h2>
-                    <div class="scroll" id="users"></div>
-                  </section>
-                  <section>
-                    <h2>Романы</h2>
-                    <div class="scroll" id="novels"></div>
-                  </section>
-                  <section>
-                    <h2>LLM-запросы</h2>
-                    <div class="scroll" id="llm"></div>
-                  </section>
-                </main>
-                <script>
-                  const token = document.getElementById('token');
-                  const statusEl = document.getElementById('status');
-                  const saved = localStorage.getItem('adminToken');
-                  if (saved) token.value = saved;
-
-                  function headers() {
-                    return {'X-Admin-Token': token.value.trim()};
-                  }
-                  async function api(path) {
-                    const res = await fetch(path, {headers: headers()});
-                    if (!res.ok) throw new Error(await res.text());
-                    return res.json();
-                  }
-                  function metric(label, value) {
-                    return `<div class="metric"><strong>${value ?? 0}</strong>${label}</div>`;
-                  }
-                  function renderOverview(data) {
-                    document.getElementById('overview').innerHTML = [
-                      metric('Пользователи', data.users),
-                      metric('Администраторы', data.admins),
-                      metric('Романы', data.novels),
-                      metric('Главы', data.chapters),
-                      metric('Участники', data.authors),
-                      metric('Владельцы', data.owners),
-                      metric('Соавторы', data.co_authors),
-                      metric('Слова', data.words),
-                      metric('Символы', data.characters),
-                      metric('LLM-запросы', data.llm_requests)
-                    ].join('');
-                  }
-                  function table(rows) {
-                    if (!rows.length) return '<p class="status">Нет данных.</p>';
-                    const keys = Object.keys(rows[0]);
-                    const head = keys.map(k => `<th>${k}</th>`).join('');
-                    const body = rows.map(row => `<tr>${keys.map(k => `<td>${row[k] ?? ''}</td>`).join('')}</tr>`).join('');
-                    return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
-                  }
-                  async function load() {
-                    localStorage.setItem('adminToken', token.value.trim());
-                    statusEl.textContent = 'Загрузка...';
-                    const [overview, users, novels, llm] = await Promise.all([
-                      api('/admin/api/overview'),
-                      api('/admin/api/users'),
-                      api('/admin/api/novels'),
-                      api('/admin/api/llm-requests')
-                    ]);
-                    renderOverview(overview);
-                    document.getElementById('users').innerHTML = table(users);
-                    document.getElementById('novels').innerHTML = table(novels);
-                    document.getElementById('llm').innerHTML = table(llm);
-                    statusEl.textContent = 'Обновлено';
-                  }
-                  document.getElementById('load').addEventListener('click', () => load().catch(e => statusEl.textContent = e.message));
-                </script>
-                </body>
-                </html>
-                """;
-    }
-
-    private String editorHtml() {
-        return """
-                <!doctype html>
-                <html lang="ru">
-                <head>
-                  <meta charset="utf-8">
-                  <meta name="viewport" content="width=device-width, initial-scale=1">
-                  <script src="https://telegram.org/js/telegram-web-app.js"></script>
-                  <title>Редактор главы</title>
-                  <style>
-                    :root {
-                      color-scheme: light dark;
-                      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-                      background: var(--tg-theme-bg-color, #ffffff);
-                      color: var(--tg-theme-text-color, #111111);
-                    }
-                    body { margin: 0; padding: 16px; }
-                    main { display: grid; gap: 12px; max-width: 1040px; margin: 0 auto; }
-                    input, textarea, button {
-                      font: inherit;
-                      border: 1px solid var(--tg-theme-hint-color, #b7b7b7);
-                      border-radius: 8px;
-                      background: var(--tg-theme-secondary-bg-color, #f5f5f5);
-                      color: var(--tg-theme-text-color, #111111);
-                    }
-                    input { padding: 10px 12px; }
-                    textarea { min-height: 58vh; padding: 12px; resize: vertical; line-height: 1.5; }
-                    .bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-                    button { padding: 10px 12px; cursor: pointer; }
-                    button.primary { background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #ffffff); border-color: transparent; }
-                    .llm {
-                      display: grid;
-                      gap: 10px;
-                      border: 1px solid var(--tg-theme-hint-color, #b7b7b7);
-                      border-radius: 8px;
-                      padding: 12px;
-                      background: var(--tg-theme-secondary-bg-color, #f5f5f5);
-                    }
-                    .llm textarea { min-height: 92px; background: var(--tg-theme-bg-color, #ffffff); }
-                    .llm-result { min-height: 140px; }
-                    .status { color: var(--tg-theme-hint-color, #707579); }
-                    .danger { color: var(--tg-theme-destructive-text-color, #d14); }
-                  </style>
-                </head>
-                <body>
-                <main>
-                  <input id="title" maxlength="100" placeholder="Название главы">
-                  <textarea id="text" placeholder="Текст главы"></textarea>
-                  <div class="bar">
-                    <button class="primary" id="save">Сохранить</button>
-                    <button id="download">Скачать .txt</button>
-                    <button id="reload">Перезагрузить</button>
-                    <span class="status" id="counter"></span>
-                  </div>
-                  <section class="llm">
-                    <div class="bar">
-                      <button id="llmContinue">Продолжить главу</button>
-                      <button id="llmAdvice">Совет</button>
-                      <button id="llmDraft">Черновик</button>
-                      <button id="llmRefresh">Проверить статус</button>
-                      <button class="primary" id="llmInsert">Вставить результат</button>
-                    </div>
-                    <textarea id="llmPrompt" maxlength="1000" placeholder="Вопрос или запрос для совета и черновика"></textarea>
-                    <textarea class="llm-result" id="llmResult" readonly placeholder="Результат LLM появится здесь"></textarea>
-                    <div class="status" id="llmStatus"></div>
-                  </section>
-                  <div class="status" id="status"></div>
-                </main>
-                <script>
-                  const tg = window.Telegram?.WebApp;
-                  tg?.ready();
-                  tg?.expand();
-                  const params = new URLSearchParams(location.search);
-                  const novelId = params.get('novelId');
-                  const chapterId = params.get('chapterId');
-                  const initData = tg?.initData || '';
-                  const title = document.getElementById('title');
-                  const text = document.getElementById('text');
-                  const counter = document.getElementById('counter');
-                  const statusEl = document.getElementById('status');
-                  const saveButton = document.getElementById('save');
-                  const llmPrompt = document.getElementById('llmPrompt');
-                  const llmResult = document.getElementById('llmResult');
-                  const llmStatus = document.getElementById('llmStatus');
-                  let updatedAt = null;
-                  let dirtyDraft = '';
-                  let currentLlmId = null;
-
-                  function headers() {
-                    return {'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData};
-                  }
-                  function count() {
-                    const words = text.value.trim() ? text.value.trim().split(/\\s+/).length : 0;
-                    counter.textContent = `${words} слов, ${text.value.length} символов`;
-                    dirtyDraft = text.value;
-                  }
-                  async function load() {
-                    statusEl.textContent = 'Загрузка...';
-                    const res = await fetch(`/mini/api/chapters/${novelId}/${chapterId}`, {headers: headers()});
-                    if (!res.ok) throw new Error(await res.text());
-                    const data = await res.json();
-                    title.value = data.title;
-                    text.value = data.text;
-                    updatedAt = data.updated_at;
-                    statusEl.textContent = 'Глава загружена';
-                    count();
-                  }
-                  async function save() {
-                    statusEl.textContent = 'Сохранение...';
-                    const res = await fetch(`/mini/api/chapters/${novelId}/${chapterId}`, {
-                      method: 'PUT',
-                      headers: headers(),
-                      body: JSON.stringify({title: title.value, text: text.value, updated_at: updatedAt})
-                    });
-                    if (res.status === 409) {
-                      statusEl.innerHTML = '<span class="danger">Глава изменилась у другого автора. Скачайте черновик или перезагрузите актуальную версию.</span>';
-                      return;
-                    }
-                    if (!res.ok) throw new Error(await res.text());
-                    const data = await res.json();
-                    updatedAt = data.updated_at;
-                    statusEl.textContent = 'Сохранено';
-                    tg?.HapticFeedback?.notificationOccurred('success');
-                  }
-                  function download() {
-                    const blob = new Blob([dirtyDraft || text.value], {type: 'text/plain;charset=utf-8'});
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `${title.value || 'chapter'}.txt`;
-                    a.click();
-                    URL.revokeObjectURL(url);
-                  }
-                  async function createLlm(type) {
-                    const prompt = llmPrompt.value.trim();
-                    if (type !== 'CONTINUE_CHAPTER' && !prompt) {
-                      llmStatus.textContent = 'Введите вопрос или запрос.';
-                      return;
-                    }
-                    llmStatus.textContent = 'LLM-запрос отправляется...';
-                    const res = await fetch(`/mini/api/chapters/${novelId}/${chapterId}/llm`, {
-                      method: 'POST',
-                      headers: headers(),
-                      body: JSON.stringify({type, prompt})
-                    });
-                    if (!res.ok) throw new Error(await res.text());
-                    renderLlm(await res.json());
-                  }
-                  async function refreshLlm() {
-                    if (!currentLlmId) {
-                      llmStatus.textContent = 'Сначала отправьте LLM-запрос.';
-                      return;
-                    }
-                    const res = await fetch(`/mini/api/llm/${currentLlmId}`, {headers: headers()});
-                    if (!res.ok) throw new Error(await res.text());
-                    renderLlm(await res.json());
-                  }
-                  function renderLlm(data) {
-                    currentLlmId = data.id;
-                    if (data.status === 'DONE') {
-                      llmResult.value = data.result || '';
-                      llmStatus.textContent = `LLM-запрос #${data.id} готов`;
-                      tg?.HapticFeedback?.notificationOccurred('success');
-                      return;
-                    }
-                    if (data.status === 'ERROR') {
-                      llmStatus.textContent = data.error_message || `LLM-запрос #${data.id} завершился ошибкой`;
-                      return;
-                    }
-                    llmStatus.textContent = `LLM-запрос #${data.id}: ${data.status}`;
-                    setTimeout(() => refreshLlm().catch(e => llmStatus.textContent = e.message), 2500);
-                  }
-                  function insertLlmResult() {
-                    if (!llmResult.value.trim()) {
-                      llmStatus.textContent = 'Нет результата для вставки.';
-                      return;
-                    }
-                    const start = text.selectionStart ?? text.value.length;
-                    const end = text.selectionEnd ?? text.value.length;
-                    const before = text.value.slice(0, start);
-                    const after = text.value.slice(end);
-                    const addition = (before && !before.endsWith('\\n') ? '\\n\\n' : '') + llmResult.value.trim() + (after && !after.startsWith('\\n') ? '\\n\\n' : '');
-                    text.value = before + addition + after;
-                    text.focus();
-                    text.selectionStart = text.selectionEnd = (before + addition).length;
-                    count();
-                    llmStatus.textContent = 'Результат вставлен в текст главы. Сохраните изменения.';
-                  }
-                  text.addEventListener('input', count);
-                  title.addEventListener('input', count);
-                  saveButton.addEventListener('click', () => save().catch(e => statusEl.textContent = e.message));
-                  document.getElementById('download').addEventListener('click', download);
-                  document.getElementById('reload').addEventListener('click', () => load().catch(e => statusEl.textContent = e.message));
-                  document.getElementById('llmContinue').addEventListener('click', () => createLlm('CONTINUE_CHAPTER').catch(e => llmStatus.textContent = e.message));
-                  document.getElementById('llmAdvice').addEventListener('click', () => createLlm('ADVICE').catch(e => llmStatus.textContent = e.message));
-                  document.getElementById('llmDraft').addEventListener('click', () => createLlm('DRAFT').catch(e => llmStatus.textContent = e.message));
-                  document.getElementById('llmRefresh').addEventListener('click', () => refreshLlm().catch(e => llmStatus.textContent = e.message));
-                  document.getElementById('llmInsert').addEventListener('click', insertLlmResult);
-                  if (!novelId || !chapterId) {
-                    statusEl.textContent = 'Откройте редактор из карточки конкретной главы в боте.';
-                    title.disabled = true;
-                    text.disabled = true;
-                    saveButton.disabled = true;
-                    document.querySelectorAll('button, #llmPrompt').forEach(item => item.disabled = true);
-                  } else {
-                    load().catch(e => statusEl.textContent = e.message);
-                  }
-                </script>
-                </body>
-                </html>
-                """;
     }
 }

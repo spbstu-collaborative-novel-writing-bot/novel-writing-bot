@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Админ-панель бота</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17202a; background: #f4f7f9; }
+    body { margin: 0; }
+    main { max-width: 1180px; margin: 0 auto; padding: 20px; display: grid; gap: 16px; }
+    h1, h2 { margin: 0; letter-spacing: 0; }
+    h1 { font-size: 28px; }
+    h2 { font-size: 18px; }
+    .toolbar, section { background: #ffffff; border: 1px solid #d9e2e7; border-radius: 8px; padding: 14px; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    input, button { font: inherit; border-radius: 8px; border: 1px solid #b9c7d1; padding: 9px 11px; }
+    input { min-width: min(420px, 100%); flex: 1; }
+    button { background: #1f6feb; color: white; border-color: #1f6feb; cursor: pointer; }
+    button.danger { background: #c62828; border-color: #c62828; }
+    .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+    .metric { border: 1px solid #d9e2e7; border-radius: 8px; padding: 12px; background: #fbfcfd; }
+    .metric strong { display: block; font-size: 24px; }
+    .status { color: #607080; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { border-bottom: 1px solid #e4ebf0; padding: 8px; text-align: left; vertical-align: top; }
+    th { color: #405060; font-weight: 600; }
+    .scroll { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Админ-панель бота</h1>
+  <div class="toolbar">
+    <input id="token" type="password" placeholder="X-Admin-Token">
+    <button id="load">Обновить</button>
+    <span class="status" id="status"></span>
+  </div>
+  <section>
+    <h2>Статистика</h2>
+    <div class="grid" id="overview"></div>
+  </section>
+  <section>
+    <h2>Пользователи</h2>
+    <div class="scroll" id="users"></div>
+  </section>
+  <section>
+    <h2>Романы</h2>
+    <div class="scroll" id="novels"></div>
+  </section>
+  <section>
+    <h2>LLM-запросы</h2>
+    <div class="scroll" id="llm"></div>
+  </section>
+</main>
+<script>
+  const token = document.getElementById('token');
+  const statusEl = document.getElementById('status');
+  const saved = localStorage.getItem('adminToken');
+  if (saved) token.value = saved;
+
+  function headers() {
+    return {'X-Admin-Token': token.value.trim()};
+  }
+
+  async function api(path) {
+    const res = await fetch(path, {headers: headers()});
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  }
+
+  function metric(label, value) {
+    return `<div class="metric"><strong>${value ?? 0}</strong>${label}</div>`;
+  }
+
+  function renderOverview(data) {
+    document.getElementById('overview').innerHTML = [
+      metric('Пользователи', data.users),
+      metric('Романы', data.novels),
+      metric('Главы', data.chapters),
+      metric('Участники', data.authors),
+      metric('Владельцы', data.owners),
+      metric('Соавторы', data.co_authors),
+      metric('Слова', data.words),
+      metric('Символы', data.characters),
+      metric('LLM-запросы', data.llm_requests)
+    ].join('');
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#39;');
+  }
+
+  function table(rows, actions) {
+    if (!rows.length) return '<p class="status">Нет данных.</p>';
+    const keys = Object.keys(rows[0]);
+    const head = keys.map(k => `<th>${escapeHtml(k)}</th>`).join('') + (actions ? '<th>actions</th>' : '');
+    const body = rows.map(row => {
+      const cells = keys.map(k => `<td>${escapeHtml(row[k])}</td>`).join('');
+      return `<tr>${cells}${actions ? `<td>${actions(row)}</td>` : ''}</tr>`;
+    }).join('');
+    return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  }
+
+  function novelActions(row) {
+    return `<button class="danger" data-delete-novel="${escapeHtml(row.id)}" data-title="${escapeHtml(row.title)}">Удалить</button>`;
+  }
+
+  async function deleteNovel(id, title) {
+    const reason = prompt(`Причина удаления произведения «${title}»:`);
+    if (!reason || !reason.trim()) {
+      statusEl.textContent = 'Удаление отменено: причина обязательна.';
+      return;
+    }
+    if (!confirm(`Удалить произведение «${title}» и отправить авторам полный текст?`)) {
+      return;
+    }
+    statusEl.textContent = 'Удаление произведения...';
+    const res = await fetch(`/admin/api/novels/${id}/delete`, {
+      method: 'POST',
+      headers: {...headers(), 'Content-Type': 'application/json'},
+      body: JSON.stringify({reason})
+    });
+    if (!res.ok) throw new Error(await res.text());
+    await load();
+    statusEl.textContent = 'Произведение удалено';
+  }
+
+  function bindNovelActions() {
+    document.querySelectorAll('[data-delete-novel]').forEach(button => {
+      button.addEventListener('click', () => deleteNovel(button.dataset.deleteNovel, button.dataset.title)
+        .catch(e => statusEl.textContent = e.message));
+    });
+  }
+
+  async function load() {
+    localStorage.setItem('adminToken', token.value.trim());
+    statusEl.textContent = 'Загрузка...';
+    const [overview, users, novels, llm] = await Promise.all([
+      api('/admin/api/overview'),
+      api('/admin/api/users'),
+      api('/admin/api/novels'),
+      api('/admin/api/llm-requests')
+    ]);
+    renderOverview(overview);
+    document.getElementById('users').innerHTML = table(users);
+    document.getElementById('novels').innerHTML = table(novels, novelActions);
+    document.getElementById('llm').innerHTML = table(llm);
+    bindNovelActions();
+    statusEl.textContent = 'Обновлено';
+  }
+
+  document.getElementById('load').addEventListener('click', () => load().catch(e => statusEl.textContent = e.message));
+</script>
+</body>
+</html>

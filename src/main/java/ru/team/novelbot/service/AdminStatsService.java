@@ -20,7 +20,6 @@ public class AdminStatsService {
     public Map<String, Object> overview() {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("users", scalar("SELECT COUNT(*) FROM app_users"));
-        result.put("admins", scalar("SELECT COUNT(*) FROM app_users WHERE role = 'ADMIN'"));
         result.put("novels", scalar("SELECT COUNT(*) FROM novels"));
         result.put("chapters", scalar("SELECT COUNT(*) FROM chapters"));
         result.put("authors", scalar("SELECT COUNT(*) FROM novel_authors"));
@@ -38,12 +37,12 @@ public class AdminStatsService {
     public List<Map<String, Object>> users() {
         return jdbcTemplate.query(
                 """
-                SELECT u.chat_id, u.username, u.display_name, u.role, u.created_at,
+                SELECT u.chat_id, u.username, u.display_name, u.created_at,
                        COUNT(DISTINCT a.novel_id) AS accessible_novels,
                        SUM(CASE WHEN a.author_type = 'OWNER' THEN 1 ELSE 0 END) AS owned_novels
                 FROM app_users u
                 LEFT JOIN novel_authors a ON a.chat_id = u.chat_id
-                GROUP BY u.chat_id, u.username, u.display_name, u.role, u.created_at
+                GROUP BY u.chat_id, u.username, u.display_name, u.created_at
                 ORDER BY u.created_at DESC, u.chat_id DESC
                 """,
                 (rs, rowNum) -> {
@@ -51,7 +50,6 @@ public class AdminStatsService {
                     item.put("chat_id", rs.getLong("chat_id"));
                     item.put("username", text(rs.getString("username")));
                     item.put("display_name", text(rs.getString("display_name")));
-                    item.put("role", rs.getString("role"));
                     item.put("created_at", time(rs.getTimestamp("created_at")));
                     item.put("accessible_novels", rs.getInt("accessible_novels"));
                     item.put("owned_novels", rs.getInt("owned_novels"));
@@ -75,7 +73,7 @@ public class AdminStatsService {
                     item.put("id", rs.getLong("id"));
                     item.put("title", rs.getString("title"));
                     item.put("genre", rs.getString("genre"));
-                    item.put("creator_chat_id", rs.getLong("owner_chat_id"));
+                    item.put("owner_chat_id", rs.getLong("owner_chat_id"));
                     item.put("created_at", time(rs.getTimestamp("created_at")));
                     item.put("updated_at", time(rs.getTimestamp("updated_at")));
                     item.put("author_count", rs.getInt("author_count"));

@@ -11,7 +11,7 @@
 - `TelegramBotAdapter` получает `message` и `callback_query` updates через Telegram Bot API и выполняет действия роутера: сообщения, редактирование, документы, callback-ответы.
 - `CommandRouter` разбирает команды, callback-кнопки и пошаговые Telegram-сессии.
 - `TelegramClient` инкапсулирует вызовы Telegram Bot API: `sendMessage`, `editMessageText`, `answerCallbackQuery`, `sendDocument`, `getFile`.
-- `UserAuthService` регистрирует пользователя по `chat_id` и назначает `User` или `Admin`.
+- `UserAuthService` регистрирует пользователя по `chat_id` и обновляет профиль Telegram без системных ролей.
 - `NovelService` управляет произведениями, владельцами и соавторами.
 - `ChapterService` управляет главами, сохраняет историю изменений и поддерживает optimistic update для Mini App редактора.
 - `AccessControlService` проверяет роли `OWNER` и `CO_AUTHOR`.
@@ -19,7 +19,8 @@
 - `AdminStatsService` собирает статистику для админ-панели.
 - `RabbitMqLlmTaskPublisher` публикует задачу в очередь `llm.requests`.
 - `LlmWorker` читает задачи из RabbitMQ, вызывает LLM API, сохраняет `DONE` или `ERROR` и уведомляет пользователя в Telegram.
-- `HttpRoutes` предоставляет `GET /healthcheck`, `GET /users`, Web-админку, Mini App endpoints редактора главы и Mini App LLM endpoints.
+- `HttpLlmClient` поддерживает GigaChat OAuth + Bearer, OpenAI-compatible endpoints, кэширование access token и опциональный сертификат GigaChat через `GIGACHAT_CA_CERT_PATH`.
+- `HttpRoutes` предоставляет `GET /healthcheck`, Web-админку, Admin JSON API, Mini App endpoints редактора главы и Mini App LLM endpoints.
 - `MiniAppAuthService` проверяет подпись Telegram `initData` для WebUI.
 - Repository layer использует `JdbcTemplate` и SQL-запросы.
 
@@ -27,12 +28,12 @@
 
 Пользователь отправляет команду или нажимает inline-кнопку в Telegram. Адаптер превращает update в `TelegramInboundMessage`, затем `CommandRouter` вызывает нужный сервис и возвращает список Telegram-действий. Сервисы проверяют доступ и работают с репозиториями. Для LLM-действий сервис создает запись в `llm_requests`, публикует сообщение в RabbitMQ, а пользователь получает номер запроса. Worker асинхронно обрабатывает задачу, обновляет статус и отправляет результат или ошибку пользователю.
 
-HTTP-клиент или браузер вызывает `/healthcheck` без авторизации. Для `/users` и `/admin/api/*` требуется заголовок `X-Admin-Token`; системная роль пользователя в Telegram для этих endpoint-ов не используется, доступ контролируется HTTP-токеном. Mini App редактор вызывает `/mini/api/chapters/...` и `/mini/api/llm/...` с заголовком `X-Telegram-Init-Data`; сервер проверяет подпись и затем применяет обычные права `OWNER`/`CO_AUTHOR`.
+HTTP-клиент или браузер вызывает `/healthcheck` без авторизации. Для `/admin/api/*` требуется заголовок `X-Admin-Token`; Telegram-роль пользователя для этих endpoint-ов не используется, доступ контролируется HTTP-токеном. Mini App редактор вызывает `/mini/api/chapters/...` и `/mini/api/llm/...` с заголовком `X-Telegram-Init-Data`; сервер проверяет подпись, свежесть `auth_date` и затем применяет обычные права `OWNER`/`CO_AUTHOR`.
 
 ## Структура данных
 
 ```text
-app_users(chat_id, username, display_name, role, created_at)
+app_users(chat_id, username, display_name, created_at)
 novels(id, title, description, genre, owner_chat_id, created_at, updated_at)
 novel_authors(novel_id, chat_id, author_type)
 chapters(id, novel_id, title, text, order_number, created_at, updated_at, last_editor_chat_id)
@@ -41,7 +42,7 @@ llm_requests(id, chat_id, novel_id, chapter_id, request_type, status, prompt, re
 telegram_sessions(chat_id, state, novel_id, chapter_id, payload, updated_at)
 ```
 
-`novel_authors.author_type` хранит `OWNER` или `CO_AUTHOR`. У произведения может быть несколько владельцев, последний владелец не удаляется. Удаление произведения каскадно удаляет авторов, главы, историю и LLM-запросы. История главы ограничивается последними пятью версиями.
+`novel_authors.author_type` хранит `OWNER` или `CO_AUTHOR`. У произведения может быть несколько владельцев, последний владелец не удаляется. Обычное удаление владельцем и админское удаление каскадно удаляют авторов, главы, историю и LLM-запросы. При админском удалении `AdminNovelDeletionService` сначала отправляет всем авторам причину и полный `.txt`; если хотя бы одно Telegram-уведомление не прошло, удаление блокируется. История главы ограничивается последними пятью версиями.
 
 ## Обработка команд
 

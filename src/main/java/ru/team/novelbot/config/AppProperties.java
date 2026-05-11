@@ -3,13 +3,10 @@ package ru.team.novelbot.config;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.stream.Collectors;
 
 public record AppProperties(
         String telegramBotToken,
         String telegramWebAppUrl,
-        Set<Long> adminChatIds,
         String httpAdminToken,
         int httpPort,
         Database database,
@@ -20,7 +17,6 @@ public record AppProperties(
     public static AppProperties fromEnv(Map<String, String> env, boolean strict) {
         var missing = new StringBuilder();
         String telegramToken = value(env, "TELEGRAM_BOT_TOKEN", strict, missing);
-        String adminIds = value(env, "ADMIN_CHAT_IDS", strict, missing);
         String httpToken = value(env, "HTTP_ADMIN_TOKEN", strict, missing);
         String pgHost = value(env, "POSTGRES_HOST", strict, missing);
         String pgPort = value(env, "POSTGRES_PORT", strict, missing);
@@ -36,11 +32,6 @@ public record AppProperties(
             throw new IllegalStateException("Не заданы обязательные переменные окружения: " + missing);
         }
 
-        Set<Long> parsedAdminIds = parseLongSet(adminIds);
-        if (strict && parsedAdminIds.isEmpty()) {
-            throw new IllegalStateException("ADMIN_CHAT_IDS должен содержать хотя бы один chat_id администратора.");
-        }
-
         String configuredProvider = env.getOrDefault("LLM_PROVIDER", "").trim();
         String llmApiKey = env.getOrDefault("LLM_API_KEY", "");
         String gigachatAuthKey = env.getOrDefault("GIGACHAT_AUTH_KEY", "");
@@ -51,7 +42,6 @@ public record AppProperties(
         return new AppProperties(
                 telegramToken,
                 env.getOrDefault("TELEGRAM_WEB_APP_URL", "").trim(),
-                parsedAdminIds,
                 httpToken,
                 integer(env.getOrDefault("HTTP_PORT", "8080"), "HTTP_PORT"),
                 new Database(pgHost, integer(pgPort, "POSTGRES_PORT"), pgDb, pgUser, pgPassword),
@@ -69,7 +59,9 @@ public record AppProperties(
                         env.getOrDefault("LLM_MODEL", ""),
                         gigachatAuthKey,
                         env.getOrDefault("GIGACHAT_SCOPE", "GIGACHAT_API_PERS"),
-                        env.getOrDefault("GIGACHAT_OAUTH_URL", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth")
+                        env.getOrDefault("GIGACHAT_OAUTH_URL", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"),
+                        env.getOrDefault("GIGACHAT_CA_CERT_PATH", "").trim(),
+                        bool(env.getOrDefault("GIGACHAT_VERIFY_SSL", "true"), "GIGACHAT_VERIFY_SSL")
                 ),
                 parseAuthors(env.getOrDefault(
                         "PROJECT_AUTHORS",
@@ -101,15 +93,15 @@ public record AppProperties(
         }
     }
 
-    private static Set<Long> parseLongSet(String value) {
-        if (value == null || value.isBlank()) {
-            return Set.of();
+    private static boolean bool(String value, String key) {
+        String normalized = value == null ? "" : value.trim().toLowerCase();
+        if ("true".equals(normalized) || "1".equals(normalized) || "yes".equals(normalized)) {
+            return true;
         }
-        return Arrays.stream(value.split(","))
-                .map(String::trim)
-                .filter(item -> !item.isBlank())
-                .map(Long::parseLong)
-                .collect(Collectors.toUnmodifiableSet());
+        if ("false".equals(normalized) || "0".equals(normalized) || "no".equals(normalized)) {
+            return false;
+        }
+        throw new IllegalStateException("Переменная " + key + " должна быть true или false.");
     }
 
     private static List<String> parseAuthors(String value) {
@@ -132,7 +124,9 @@ public record AppProperties(
             String model,
             String gigachatAuthKey,
             String gigachatScope,
-            String gigachatOauthUrl
+            String gigachatOauthUrl,
+            String gigachatCaCertPath,
+            boolean gigachatVerifySsl
     ) {
         public static final String GIGACHAT = "GIGACHAT";
         public static final String OPENAI_COMPATIBLE = "OPENAI_COMPATIBLE";
@@ -163,7 +157,7 @@ public record AppProperties(
             if (model != null && !model.isBlank()) {
                 return model;
             }
-            return gigachat() ? "GigaChat" : "gpt-4o-mini";
+            return gigachat() ? "GigaChat-2" : "gpt-4o-mini";
         }
 
         public String effectiveProvider() {

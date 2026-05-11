@@ -735,7 +735,10 @@ public class CommandRouter {
         }
         rows.add(List.of(TelegramButton.callback("Скачать .txt", "txt:chapter:" + novelId + ":" + chapter.id()), TelegramButton.callback("Заменить текст", "edit:replace:" + novelId + ":" + chapter.id())));
         rows.add(List.of(TelegramButton.callback("Добавить в конец", "edit:append:" + novelId + ":" + chapter.id()), TelegramButton.callback("Переименовать", "edit:rename:" + novelId + ":" + chapter.id())));
-        rows.add(List.of(TelegramButton.callback("История", "hist:" + novelId + ":" + chapter.id()), TelegramButton.callback("Удалить главу", "delchapter:" + novelId + ":" + chapter.id())));
+        TelegramButton historyButton = webAppUrl == null
+                ? TelegramButton.callback("История", "hist:" + novelId + ":" + chapter.id())
+                : TelegramButton.webApp("История", editorUrl(novelId, chapter.id(), "history"));
+        rows.add(List.of(historyButton, TelegramButton.callback("Удалить главу", "delchapter:" + novelId + ":" + chapter.id())));
         rows.add(List.of(TelegramButton.callback("LLM продолжить", "llm:continue:" + novelId + ":" + chapter.id())));
         rows.add(List.of(TelegramButton.callback("К главам", "chapters:" + novelId + ":0"), TelegramButton.callback("К роману", "novel:" + novelId)));
         return List.copyOf(rows);
@@ -749,12 +752,19 @@ public class CommandRouter {
     }
 
     private String editorUrl(long novelId, long chapterId) {
+        return editorUrl(novelId, chapterId, null);
+    }
+
+    private String editorUrl(long novelId, long chapterId, String view) {
         String base = properties.telegramWebAppUrl();
         if (base == null || base.isBlank()) {
             return null;
         }
         String separator = base.contains("?") ? "&" : "?";
-        return base + separator + "novelId=" + novelId + "&chapterId=" + chapterId;
+        String url = base + separator + "novelId=" + novelId + "&chapterId=" + chapterId;
+        return view == null || view.isBlank()
+                ? url
+                : url + "&view=" + URLEncoder.encode(view, StandardCharsets.UTF_8);
     }
 
     private String accepted(LlmRequest request) {

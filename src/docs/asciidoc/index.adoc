@@ -11,39 +11,30 @@ include::{snippets}/healthcheck/http-request.adoc[]
 include::{snippets}/healthcheck/http-response.adoc[]
 include::{snippets}/healthcheck/response-fields.adoc[]
 
-== GET /users
-
-Административный endpoint со списком зарегистрированных пользователей. Требует заголовок `X-Admin-Token`.
-
-=== Успешный запрос
-
-include::{snippets}/users-success/http-request.adoc[]
-include::{snippets}/users-success/request-headers.adoc[]
-include::{snippets}/users-success/http-response.adoc[]
-include::{snippets}/users-success/response-fields.adoc[]
-
-=== Ошибка доступа
-
-include::{snippets}/users-forbidden/http-request.adoc[]
-include::{snippets}/users-forbidden/http-response.adoc[]
-include::{snippets}/users-forbidden/response-fields.adoc[]
-
 == GET /admin
 
-HTML-панель администратора. Панель запрашивает `X-Admin-Token` и вызывает защищенные JSON endpoint-ы.
+HTML-оболочка панели администратора. Панель запрашивает `X-Admin-Token` в браузере и вызывает защищенные JSON endpoint-ы `/admin/api/*`.
 
 == Admin JSON API
 
 Все endpoint-ы требуют заголовок `X-Admin-Token`.
 
 * `GET /admin/api/overview` — агрегированная статистика пользователей, романов, глав, участников и LLM-запросов.
-* `GET /admin/api/users` — пользователи, роли и количество доступных романов.
+* `GET /admin/api/users` — пользователи и количество доступных романов.
 * `GET /admin/api/novels` — романы, число авторов, глав и объем текста.
 * `GET /admin/api/llm-requests` — последние LLM-запросы и ошибки.
+* `POST /admin/api/novels/{novelId}/delete` — удаляет произведение после обязательной отправки причины и полного `.txt` всем авторам.
+
+=== GET /admin/api/users
+
+include::{snippets}/admin-users-success/http-request.adoc[]
+include::{snippets}/admin-users-success/request-headers.adoc[]
+include::{snippets}/admin-users-success/http-response.adoc[]
+include::{snippets}/admin-users-success/response-fields.adoc[]
 
 == Mini App LLM API
 
-Все endpoint-ы требуют заголовок `X-Telegram-Init-Data`.
+Все endpoint-ы требуют заголовок `X-Telegram-Init-Data`; подпись и свежесть `auth_date` проверяются сервером.
 
 * `POST /mini/api/chapters/{novelId}/{chapterId}/llm` — создает LLM-запрос из Web-редактора.
 * `GET /mini/api/llm/{requestId}` — возвращает статус и результат LLM-запроса.

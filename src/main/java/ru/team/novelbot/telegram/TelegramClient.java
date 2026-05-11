@@ -49,6 +49,14 @@ public class TelegramClient {
 
     public void sendMessage(long chatId, String text, List<List<TelegramButton>> keyboard) {
         try {
+            sendMessageOrThrow(chatId, text, keyboard);
+        } catch (Exception ex) {
+            log.warn("Не удалось отправить сообщение в Telegram: {}", ex.getMessage());
+        }
+    }
+
+    public void sendMessageOrThrow(long chatId, String text, List<List<TelegramButton>> keyboard) {
+        try {
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("chat_id", chatId);
             body.put("text", MessageFormatter.telegramSafe(text));
@@ -56,7 +64,7 @@ public class TelegramClient {
             addKeyboard(body, keyboard);
             postJson("sendMessage", body);
         } catch (Exception ex) {
-            log.warn("Не удалось отправить сообщение в Telegram: {}", ex.getMessage());
+            throw new IllegalStateException("Не удалось отправить сообщение в Telegram.", ex);
         }
     }
 
@@ -98,6 +106,14 @@ public class TelegramClient {
 
     public void sendDocument(long chatId, String filename, String text) {
         try {
+            sendDocumentOrThrow(chatId, filename, text);
+        } catch (Exception ex) {
+            log.warn("Не удалось отправить документ в Telegram: {}", ex.getMessage());
+        }
+    }
+
+    public void sendDocumentOrThrow(long chatId, String filename, String text) {
+        try {
             String boundary = "----novelbot-" + UUID.randomUUID();
             byte[] body = multipart(boundary, chatId, filename, text);
             HttpRequest request = HttpRequest.newBuilder(URI.create(telegramUrl("sendDocument")))
@@ -107,10 +123,14 @@ public class TelegramClient {
                     .build();
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             if (response.statusCode() >= 300) {
-                log.warn("Telegram sendDocument вернул HTTP {}: {}", response.statusCode(), response.body());
+                throw new IllegalStateException("Telegram sendDocument вернул HTTP " + response.statusCode() + ": " + response.body());
+            }
+            JsonNode root = objectMapper.readTree(response.body());
+            if (!root.path("ok").asBoolean(false)) {
+                throw new IllegalStateException("Telegram sendDocument вернул ошибку: " + response.body());
             }
         } catch (Exception ex) {
-            log.warn("Не удалось отправить документ в Telegram: {}", ex.getMessage());
+            throw new IllegalStateException("Не удалось отправить документ в Telegram.", ex);
         }
     }
 

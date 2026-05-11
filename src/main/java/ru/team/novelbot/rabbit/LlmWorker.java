@@ -99,14 +99,15 @@ public class LlmWorker {
                 llmRequestRepository.updateStatus(request.id(), LlmRequestStatus.DONE, result, null);
                 notifyDone(request, result);
             } catch (Exception ex) {
+                String diagnostic = diagnostic(ex);
                 llmRequestRepository.updateStatus(
                         request.id(),
                         LlmRequestStatus.ERROR,
                         null,
-                        "Не удалось получить ответ от языковой модели. Попробуйте позже."
+                        diagnostic
                 );
                 notifyError(request);
-                log.warn("LLM request {} failed: {}", request.id(), ex.getMessage());
+                log.warn("LLM request {} failed: {}", request.id(), diagnostic);
             }
             channel.basicAck(deliveryTag, false);
         } catch (Exception ex) {
@@ -139,8 +140,28 @@ public class LlmWorker {
     private void notifyError(LlmRequest request) {
         telegramClient.sendMessage(
                 request.chatId(),
-                "LLM-запрос #" + request.id() + " завершился ошибкой. Не удалось получить ответ от языковой модели, попробуйте позже."
+                "LLM-запрос #" + request.id() + " завершился ошибкой. Упс... LLM сейчас недоступен. Попробуйте позже."
         );
+    }
+
+    private String diagnostic(Exception ex) {
+        Throwable current = ex;
+        Throwable last = ex;
+        while (current != null) {
+            last = current;
+            current = current.getCause();
+        }
+        String message = last.getMessage();
+        if (message == null || message.isBlank()) {
+            message = ex.getMessage();
+        }
+        if (message == null || message.isBlank()) {
+            message = ex.getClass().getSimpleName();
+        }
+        return message
+                .replaceAll("(?i)(authorization|token|key|secret|password)=[^\\s,;]+", "$1=***")
+                .replaceAll("(?i)(Bearer|Basic)\\s+[^\\s,;]+", "$1 ***")
+                .trim();
     }
 
     private ConnectionFactory connectionFactory() {

@@ -19,21 +19,27 @@ import ru.team.novelbot.repository.NovelRepository;
 import ru.team.novelbot.repository.UserRepository;
 import ru.team.novelbot.service.AccessControlService;
 import ru.team.novelbot.service.AdminStatsService;
+import ru.team.novelbot.service.AdminNovelDeletionService;
 import ru.team.novelbot.service.ChapterService;
 import ru.team.novelbot.service.LlmRequestService;
 import ru.team.novelbot.service.NovelService;
 import ru.team.novelbot.service.UserAuthService;
 import ru.team.novelbot.telegram.MiniAppAuthService;
+import ru.team.novelbot.telegram.TelegramButton;
+import ru.team.novelbot.telegram.TelegramClient;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import javax.sql.DataSource;
+import java.net.http.HttpClient;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 import static org.springframework.restdocs.headers.HeaderDocumentation.headerWithName;
 import static org.springframework.restdocs.headers.HeaderDocumentation.requestHeaders;
@@ -51,6 +57,7 @@ class HttpRoutesRestDocsTest {
     private ChapterService chapterService;
     private AppProperties properties;
     private ObjectMapper objectMapper;
+    private RecordingTelegramClient telegramClient;
 
     @BeforeEach
     void setUp(RestDocumentationContextProvider restDocumentation) {
@@ -64,10 +71,12 @@ class HttpRoutesRestDocsTest {
         ChapterRepository chapterRepository = new ChapterRepository(jdbcTemplate);
         LlmRequestRepository llmRequestRepository = new LlmRequestRepository(jdbcTemplate);
         AccessControlService accessControlService = new AccessControlService(novelRepository);
-        userAuthService = new UserAuthService(userRepository, properties);
+        userAuthService = new UserAuthService(userRepository);
+        telegramClient = new RecordingTelegramClient(properties, objectMapper);
         chapterService = new ChapterService(
                 chapterRepository,
                 novelRepository,
+                userRepository,
                 accessControlService,
                 new TransactionTemplate(new DataSourceTransactionManager(dataSource))
         );
@@ -89,12 +98,11 @@ class HttpRoutesRestDocsTest {
         );
         HttpRoutes routes = new HttpRoutes(
                 properties,
-                userAuthService,
                 chapterService,
                 llmRequestService,
                 new AdminStatsService(jdbcTemplate),
-                new MiniAppAuthService(properties, objectMapper),
-                objectMapper
+                new AdminNovelDeletionService(novelRepository, chapterRepository, telegramClient),
+                new MiniAppAuthService(properties, objectMapper)
         );
         webTestClient = WebTestClient.bindToRouterFunction(routes.routes())
                 .configureClient()
@@ -121,36 +129,25 @@ class HttpRoutesRestDocsTest {
     }
 
     @Test
-    void documentsUsersForbidden() {
-        webTestClient.get()
-                .uri("/users")
-                .exchange()
-                .expectStatus().isForbidden()
-                .expectBody()
-                .consumeWith(document(
-                        "users-forbidden",
-                        responseFields(fieldWithPath("error").description("Код ошибки доступа."))
-                ));
-    }
-
-    @Test
-    void documentsUsersSuccess() {
+    void documentsAdminUsersSuccess() {
         userAuthService.registerOrUpdate(100, "owner", "Owner");
 
         webTestClient.get()
-                .uri("/users")
+                .uri("/admin/api/users")
                 .header("X-Admin-Token", "secret")
                 .exchange()
                 .expectStatus().isOk()
                 .expectBody()
                 .consumeWith(document(
-                        "users-success",
+                        "admin-users-success",
                         requestHeaders(headerWithName("X-Admin-Token").description("Административный HTTP-токен.")),
                         responseFields(
                                 fieldWithPath("[].chat_id").description("Telegram chat_id пользователя."),
                                 fieldWithPath("[].username").description("Username Telegram, если доступен."),
-                                fieldWithPath("[].role").description("Системная роль пользователя."),
-                                fieldWithPath("[].created_at").description("Дата и время регистрации.")
+                                fieldWithPath("[].display_name").description("Отображаемое имя пользователя."),
+                                fieldWithPath("[].created_at").description("Дата и время регистрации."),
+                                fieldWithPath("[].accessible_novels").description("Количество доступных произведений."),
+                                fieldWithPath("[].owned_novels").description("Количество произведений, где пользователь владелец.")
                         )
                 ));
     }
@@ -163,7 +160,11 @@ class HttpRoutesRestDocsTest {
                 .expectStatus().isOk()
                 .expectHeader().contentTypeCompatibleWith("text/html")
                 .expectBody(String.class)
-                .consumeWith(result -> assertThat(result.getResponseBody()).contains("Продолжить главу"));
+                .consumeWith(result -> {
+                    String body = result.getResponseBody();
+                    assertThat(body).contains("Продолжить главу", "editor-toolbar", "История", "Упс... LLM сейчас недоступен");
+                    assertThat(body.indexOf("id=\"save\"")).isLessThan(body.indexOf("id=\"title\""));
+                });
     }
 
     @Test
@@ -193,7 +194,71 @@ class HttpRoutesRestDocsTest {
                 .exchange()
                 .expectStatus().isOk()
                 .expectBody(String.class)
-                .consumeWith(result -> assertThat(result.getResponseBody()).contains("\"users\":1", "\"novels\":1"));
+                .consumeWith(result -> assertThat(result.getResponseBody())
+                        .contains("\"users\":1", "\"novels\":1")
+                        .doesNotContain("\"admins\""));
+    }
+
+    @Test
+    void adminNovelsUsesOwnerChatIdField() {
+        userAuthService.registerOrUpdate(100, "owner", "Owner");
+        novelService.createNovel(100, "City", "Story", "fantasy");
+
+        webTestClient.get()
+                .uri("/admin/api/novels")
+                .header("X-Admin-Token", "secret")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class)
+                .consumeWith(result -> assertThat(result.getResponseBody())
+                        .contains("\"owner_chat_id\":100")
+                        .doesNotContain("creator_chat_id"));
+    }
+
+    @Test
+    void adminDeletesNovelAfterNotifyingAllAuthors() {
+        userAuthService.registerOrUpdate(100, "owner", "Owner");
+        userAuthService.registerOrUpdate(200, "coauthor", "Co Author");
+        var novel = novelService.createNovel(100, "City", "Story", "fantasy");
+        novelService.inviteAuthor(100, novel.id(), 200);
+        chapterService.addChapter(100, novel.id(), "Start", "Original text");
+
+        webTestClient.post()
+                .uri("/admin/api/novels/{novelId}/delete", novel.id())
+                .header("X-Admin-Token", "secret")
+                .bodyValue(Map.of("reason", "Нарушение правил публикации."))
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class)
+                .consumeWith(result -> assertThat(result.getResponseBody())
+                        .contains("\"deleted\":true", "\"notified_authors\":2"));
+
+        assertThat(novelService.listAccessible(100)).isEmpty();
+        assertThat(telegramClient.messages).hasSize(2)
+                .allSatisfy(message -> assertThat(message.text()).contains("Нарушение правил публикации."));
+        assertThat(telegramClient.documents).hasSize(2)
+                .allSatisfy(document -> assertThat(document.text()).contains("Original text"));
+    }
+
+    @Test
+    void adminDeletionDoesNotDeleteNovelWhenNotificationFails() {
+        userAuthService.registerOrUpdate(100, "owner", "Owner");
+        userAuthService.registerOrUpdate(200, "coauthor", "Co Author");
+        var novel = novelService.createNovel(100, "City", "Story", "fantasy");
+        novelService.inviteAuthor(100, novel.id(), 200);
+        telegramClient.failedChatIds.add(200L);
+
+        webTestClient.post()
+                .uri("/admin/api/novels/{novelId}/delete", novel.id())
+                .header("X-Admin-Token", "secret")
+                .bodyValue(Map.of("reason", "Нарушение правил публикации."))
+                .exchange()
+                .expectStatus().isEqualTo(409)
+                .expectBody(String.class)
+                .consumeWith(result -> assertThat(result.getResponseBody())
+                        .contains("failed_chat_ids", "200"));
+
+        assertThat(novelService.listAccessible(100)).hasSize(1);
     }
 
     @Test
@@ -202,6 +267,30 @@ class HttpRoutesRestDocsTest {
                 .uri("/mini/api/chapters/1/1")
                 .exchange()
                 .expectStatus().isForbidden();
+    }
+
+    @Test
+    void rejectsMiniApiWithInvalidPathId() throws Exception {
+        webTestClient.get()
+                .uri("/mini/api/chapters/not-a-number/1")
+                .header("X-Telegram-Init-Data", signedInitData(100))
+                .exchange()
+                .expectStatus().isBadRequest()
+                .expectBody(String.class)
+                .consumeWith(result -> assertThat(result.getResponseBody()).contains("Некорректный id"));
+    }
+
+    @Test
+    void rejectsExpiredMiniAppInitData() throws Exception {
+        long expiredAuthDate = Instant.now().minus(Duration.ofHours(25)).getEpochSecond();
+
+        webTestClient.get()
+                .uri("/mini/api/chapters/1/1")
+                .header("X-Telegram-Init-Data", signedInitData(100, expiredAuthDate))
+                .exchange()
+                .expectStatus().isForbidden()
+                .expectBody(String.class)
+                .consumeWith(result -> assertThat(result.getResponseBody()).contains("устарели"));
     }
 
     @Test
@@ -236,6 +325,39 @@ class HttpRoutesRestDocsTest {
                 .getResponseBody();
         assertThat(saved).contains("\"title\":\"Renamed\"");
         assertThat(saved).contains("\"text\":\"Updated text\"");
+    }
+
+    @Test
+    void miniApiListsVersionsAndLoadsDiff() throws Exception {
+        userAuthService.registerOrUpdate(100, "owner", "Owner");
+        var novel = novelService.createNovel(100, "City", "Story", "fantasy");
+        var chapter = chapterService.addChapter(100, novel.id(), "Start", "Original text");
+        chapterService.updateChapter(100, novel.id(), chapter.id(), "Start", "Updated text");
+        String initData = signedInitData(100);
+
+        String versions = webTestClient.get()
+                .uri("/mini/api/chapters/{novelId}/{chapterId}/versions?page=0&size=20", novel.id(), chapter.id())
+                .header("X-Telegram-Init-Data", initData)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class)
+                .returnResult()
+                .getResponseBody();
+
+        assertThat(versions)
+                .contains("\"total\":2", "\"version_number\":2", "\"is_current\":true", "\"editor_name\":\"@owner\"");
+
+        String diff = webTestClient.get()
+                .uri("/mini/api/chapters/{novelId}/{chapterId}/versions/{versionNumber}/diff", novel.id(), chapter.id(), 2)
+                .header("X-Telegram-Init-Data", initData)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class)
+                .returnResult()
+                .getResponseBody();
+
+        assertThat(diff)
+                .contains("\"version_number\":2", "\"type\":\"removed\"", "\"text\":\"Original\"", "\"type\":\"added\"", "\"text\":\"Updated\"");
     }
 
     @Test
@@ -281,19 +403,22 @@ class HttpRoutesRestDocsTest {
         return new AppProperties(
                 "telegram-token",
                 "",
-                Set.of(100L),
                 "secret",
                 8080,
                 new AppProperties.Database("localhost", 5432, "novelbot", "user", "password"),
                 new AppProperties.Rabbit("localhost", 5672, "guest", "guest", "llm.requests"),
-                new AppProperties.Llm("OPENAI_COMPATIBLE", "llm-key", "http://localhost/llm", "test-model", "", "GIGACHAT_API_PERS", "http://localhost/oauth"),
+                new AppProperties.Llm("OPENAI_COMPATIBLE", "llm-key", "http://localhost/llm", "test-model", "", "GIGACHAT_API_PERS", "http://localhost/oauth", "", true),
                 List.of("Гвоздева Е.", "Крутиков Д.", "Михайлова А.", "Романова А.")
         );
     }
 
     private String signedInitData(long chatId) throws Exception {
+        return signedInitData(chatId, Instant.now().getEpochSecond());
+    }
+
+    private String signedInitData(long chatId, long authDateEpochSecond) throws Exception {
         String user = "{\"id\":" + chatId + ",\"first_name\":\"Owner\"}";
-        String authDate = "1710000000";
+        String authDate = Long.toString(authDateEpochSecond);
         String queryId = "test-query";
         String dataCheckString = "auth_date=" + authDate + "\n"
                 + "query_id=" + queryId + "\n"
@@ -310,5 +435,37 @@ class HttpRoutesRestDocsTest {
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(key, "HmacSHA256"));
         return mac.doFinal(value);
+    }
+
+    private static final class RecordingTelegramClient extends TelegramClient {
+        private final List<SentMessage> messages = new ArrayList<>();
+        private final List<SentDocument> documents = new ArrayList<>();
+        private final List<Long> failedChatIds = new ArrayList<>();
+
+        private RecordingTelegramClient(AppProperties properties, ObjectMapper objectMapper) {
+            super(properties, HttpClient.newHttpClient(), objectMapper);
+        }
+
+        @Override
+        public void sendMessageOrThrow(long chatId, String text, List<List<TelegramButton>> keyboard) {
+            if (failedChatIds.contains(chatId)) {
+                throw new IllegalStateException("telegram unavailable");
+            }
+            messages.add(new SentMessage(chatId, text));
+        }
+
+        @Override
+        public void sendDocumentOrThrow(long chatId, String filename, String text) {
+            if (failedChatIds.contains(chatId)) {
+                throw new IllegalStateException("telegram unavailable");
+            }
+            documents.add(new SentDocument(chatId, filename, text));
+        }
+    }
+
+    private record SentMessage(long chatId, String text) {
+    }
+
+    private record SentDocument(long chatId, String filename, String text) {
     }
 }

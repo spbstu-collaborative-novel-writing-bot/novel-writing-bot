@@ -25,7 +25,6 @@ import ru.team.novelbot.service.UserAuthService;
 import javax.sql.DataSource;
 import java.net.http.HttpClient;
 import java.util.List;
-import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -49,9 +48,9 @@ class CommandRouterTest {
         LlmRequestRepository llmRequestRepository = new LlmRequestRepository(jdbcTemplate);
         sessionRepository = new TelegramSessionRepository(jdbcTemplate);
         AccessControlService accessControlService = new AccessControlService(novelRepository);
-        userAuthService = new UserAuthService(userRepository, properties);
+        userAuthService = new UserAuthService(userRepository);
         TransactionTemplate tx = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
-        chapterService = new ChapterService(chapterRepository, novelRepository, accessControlService, tx);
+        chapterService = new ChapterService(chapterRepository, novelRepository, userRepository, accessControlService, tx);
         novelService = new NovelService(novelRepository, chapterRepository, userAuthService, accessControlService, tx);
         LlmTaskPublisher publisher = task -> {
         };
@@ -178,12 +177,11 @@ class CommandRouterTest {
         return new AppProperties(
                 "telegram-token",
                 webAppUrl,
-                Set.of(100L),
                 "secret",
                 8080,
                 new AppProperties.Database("localhost", 5432, "novelbot", "user", "password"),
                 new AppProperties.Rabbit("localhost", 5672, "guest", "guest", "llm.requests"),
-                new AppProperties.Llm("OPENAI_COMPATIBLE", "llm-key", "http://localhost/llm", "test-model", "", "GIGACHAT_API_PERS", "http://localhost/oauth"),
+                new AppProperties.Llm("OPENAI_COMPATIBLE", "llm-key", "http://localhost/llm", "test-model", "", "GIGACHAT_API_PERS", "http://localhost/oauth", "", true),
                 List.of("Гвоздева Е.", "Крутиков Д.", "Михайлова А.", "Романова А.")
         );
     }

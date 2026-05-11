@@ -10,6 +10,7 @@ public record Chapter(
         int orderNumber,
         LocalDateTime createdAt,
         LocalDateTime updatedAt,
+        long createdByChatId,
         long lastEditorChatId
 ) {
 }
