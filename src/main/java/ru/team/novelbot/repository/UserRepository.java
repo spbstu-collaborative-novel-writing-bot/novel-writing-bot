@@ -21,6 +21,13 @@ public class UserRepository {
     }
 
     public AppUser upsert(long chatId, String username, String displayName) {
+        if (username != null) {
+            jdbcTemplate.update(
+                    "UPDATE app_users SET username = NULL WHERE chat_id <> ? AND LOWER(username) = LOWER(?)",
+                    chatId,
+                    username
+            );
+        }
         Optional<AppUser> existing = findByChatId(chatId);
         if (existing.isPresent()) {
             jdbcTemplate.update(
@@ -45,6 +52,20 @@ public class UserRepository {
                 "SELECT chat_id, username, display_name, created_at FROM app_users WHERE chat_id = ?",
                 rowMapper(),
                 chatId
+        );
+        return users.stream().findFirst();
+    }
+
+    public Optional<AppUser> findByUsername(String username) {
+        List<AppUser> users = jdbcTemplate.query(
+                """
+                SELECT chat_id, username, display_name, created_at
+                FROM app_users
+                WHERE username IS NOT NULL AND LOWER(username) = LOWER(?)
+                ORDER BY created_at DESC, chat_id DESC
+                """,
+                rowMapper(),
+                username
         );
         return users.stream().findFirst();
     }

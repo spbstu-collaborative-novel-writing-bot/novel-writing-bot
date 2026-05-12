@@ -73,10 +73,24 @@ public class NovelService {
         addAuthor(ownerChatId, novelId, invitedChatId, AuthorType.CO_AUTHOR);
     }
 
+    public void inviteAuthor(long ownerChatId, long novelId, String invitedTelegramTag) {
+        addAuthor(ownerChatId, novelId, invitedTelegramTag, AuthorType.CO_AUTHOR);
+    }
+
     public void addAuthor(long ownerChatId, long novelId, long invitedChatId, AuthorType authorType) {
         accessControlService.requireOwner(novelId, ownerChatId);
         userAuthService.findByChatId(invitedChatId)
                 .orElseThrow(() -> new AppException("Пользователь с указанным chat_id не найден. Он должен сначала запустить бота."));
+        addKnownAuthor(novelId, invitedChatId, authorType);
+    }
+
+    public void addAuthor(long ownerChatId, long novelId, String invitedTelegramTag, AuthorType authorType) {
+        accessControlService.requireOwner(novelId, ownerChatId);
+        AppUser invitedUser = userAuthService.requireUserByTelegramTag(invitedTelegramTag);
+        addKnownAuthor(novelId, invitedUser.chatId(), authorType);
+    }
+
+    private void addKnownAuthor(long novelId, long invitedChatId, AuthorType authorType) {
         if (novelRepository.findAuthorType(novelId, invitedChatId).isPresent()) {
             throw new AppException("Этот пользователь уже добавлен к произведению.");
         }

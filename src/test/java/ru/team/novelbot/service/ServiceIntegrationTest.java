@@ -109,6 +109,17 @@ class ServiceIntegrationTest {
     }
 
     @Test
+    void addsAuthorsByTelegramTag() {
+        userAuthService.registerOrUpdate(100, "owner", "Owner");
+        userAuthService.registerOrUpdate(200, "CoAuthor", "Co Author");
+        var novel = novelService.createNovel(100, "Город", "История города", "фантастика");
+
+        novelService.addAuthor(100, novel.id(), "@coauthor", AuthorType.CO_AUTHOR);
+
+        assertThat(novelRepository.findAuthorType(novel.id(), 200)).contains(AuthorType.CO_AUTHOR);
+    }
+
+    @Test
     void rejectsUnknownAndDuplicateAuthors() {
         userAuthService.registerOrUpdate(100, "owner", "Owner");
         userAuthService.registerOrUpdate(200, "coauthor", "Co Author");

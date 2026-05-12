@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Component;
 import ru.team.novelbot.config.AppProperties;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -25,6 +26,7 @@ public class HttpLlmClient implements LlmClient {
     private static final String DEFAULT_GIGACHAT_OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth";
     private static final String DEFAULT_GIGACHAT_SCOPE = "GIGACHAT_API_PERS";
     private static final String DEFAULT_GIGACHAT_MODEL = "GigaChat-2";
+    private static final int MAX_ATTEMPTS = 3;
 
     private final AppProperties properties;
     private final HttpClient httpClient;
@@ -99,13 +101,14 @@ public class HttpLlmClient implements LlmClient {
 
     private HttpResponse<String> sendChatRequest(String json, String token) throws Exception {
         HttpRequest request = HttpRequest.newBuilder(URI.create(chatUrl()))
+                .version(HttpClient.Version.HTTP_1_1)
                 .timeout(Duration.ofSeconds(90))
                 .header("Content-Type", "application/json")
                 .header("Accept", "application/json")
                 .header("Authorization", "Bearer " + token)
                 .POST(HttpRequest.BodyPublishers.ofString(json, StandardCharsets.UTF_8))
                 .build();
-        return httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        return sendWithRetry(request);
     }
 
     private String gigachatAccessToken() {
@@ -124,21 +127,12 @@ public class HttpLlmClient implements LlmClient {
     }
 
     private CachedToken requestGigachatToken() {
-        String requestId = UUID.randomUUID().toString();
         try {
             String body = "scope=" + URLEncoder.encode(gigachatScope(), StandardCharsets.UTF_8);
-            HttpRequest request = HttpRequest.newBuilder(URI.create(gigachatOauthUrl()))
-                    .timeout(Duration.ofSeconds(30))
-                    .header("Content-Type", "application/x-www-form-urlencoded")
-                    .header("Accept", "application/json")
-                    .header("RqUID", requestId)
-                    .header("Authorization", gigachatAuthorizationHeader())
-                    .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            TokenHttpResponse tokenResponse = sendGigachatTokenRequest(body);
+            HttpResponse<String> response = tokenResponse.response();
             if (response.statusCode() >= 300) {
-                throw new IllegalStateException(httpDiagnostic("GigaChat OAuth, RqUID=" + requestId, response));
+                throw new IllegalStateException(httpDiagnostic("GigaChat OAuth, RqUID=" + tokenResponse.requestId(), response));
             }
 
             JsonNode root = objectMapper.readTree(response.body());
@@ -165,6 +159,74 @@ public class HttpLlmClient implements LlmClient {
         } catch (Exception ex) {
             throw new IllegalStateException("Не удалось получить access_token GigaChat: " + rootCauseMessage(ex), ex);
         }
+    }
+
+    private TokenHttpResponse sendGigachatTokenRequest(String body) throws IOException, InterruptedException {
+        TokenHttpResponse lastResponse = null;
+        IOException lastException = null;
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            String requestId = UUID.randomUUID().toString();
+            HttpRequest request = HttpRequest.newBuilder(URI.create(gigachatOauthUrl()))
+                    .version(HttpClient.Version.HTTP_1_1)
+                    .timeout(Duration.ofSeconds(30))
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .header("Accept", "application/json")
+                    .header("RqUID", requestId)
+                    .header("Authorization", gigachatAuthorizationHeader())
+                    .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                    .build();
+
+            try {
+                HttpResponse<String> response = httpClient.send(
+                        request,
+                        HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)
+                );
+                lastResponse = new TokenHttpResponse(requestId, response);
+                if (!retryable(response.statusCode()) || attempt == MAX_ATTEMPTS) {
+                    return lastResponse;
+                }
+            } catch (IOException ex) {
+                lastException = ex;
+                if (attempt == MAX_ATTEMPTS) {
+                    throw ex;
+                }
+            }
+            sleepBeforeRetry(attempt);
+        }
+        if (lastResponse != null) {
+            return lastResponse;
+        }
+        throw lastException == null ? new IOException("GigaChat OAuth request failed.") : lastException;
+    }
+
+    private HttpResponse<String> sendWithRetry(HttpRequest request) throws IOException, InterruptedException {
+        IOException lastException = null;
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                HttpResponse<String> response = httpClient.send(
+                        request,
+                        HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)
+                );
+                if (!retryable(response.statusCode()) || attempt == MAX_ATTEMPTS) {
+                    return response;
+                }
+            } catch (IOException ex) {
+                lastException = ex;
+                if (attempt == MAX_ATTEMPTS) {
+                    throw ex;
+                }
+            }
+            sleepBeforeRetry(attempt);
+        }
+        throw lastException == null ? new IOException("HTTP request failed.") : lastException;
+    }
+
+    private boolean retryable(int statusCode) {
+        return statusCode == 408 || statusCode == 429 || statusCode >= 500;
+    }
+
+    private void sleepBeforeRetry(int attempt) throws InterruptedException {
+        Thread.sleep(Duration.ofMillis(500L * attempt).toMillis());
     }
 
     private String gigachatAuthorizationHeader() {
@@ -284,12 +346,36 @@ public class HttpLlmClient implements LlmClient {
     }
 
     private String rootCauseMessage(Throwable throwable) {
+        if (isSslCertificateFailure(throwable)) {
+            return "ошибка проверки SSL-сертификата GigaChat. Укажите GIGACHAT_CA_CERT_PATH с корневым сертификатом НУЦ Минцифры или для локальной разработки задайте GIGACHAT_VERIFY_SSL=false";
+        }
         Throwable current = throwable;
         while (current.getCause() != null) {
             current = current.getCause();
         }
         String message = current.getMessage();
         return sanitize(message == null ? current.getClass().getSimpleName() : message);
+    }
+
+    private boolean isSslCertificateFailure(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            String className = current.getClass().getName();
+            String message = current.getMessage();
+            if (className.contains("SSLHandshakeException")
+                    || className.contains("SunCertPathBuilderException")
+                    || className.contains("ValidatorException")) {
+                return true;
+            }
+            if (message != null) {
+                String lower = message.toLowerCase();
+                if (lower.contains("pkix") || lower.contains("certification path")) {
+                    return true;
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private String sanitize(String value) {
@@ -307,5 +393,8 @@ public class HttpLlmClient implements LlmClient {
         boolean valid() {
             return Instant.now().isBefore(expiresAt);
         }
+    }
+
+    private record TokenHttpResponse(String requestId, HttpResponse<String> response) {
     }
 }

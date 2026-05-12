@@ -540,7 +540,11 @@ public class CommandRouter {
             requireNovelOwner(chatId, novelId);
             sessionRepository.save(chatId, "ADD_AUTHOR", novelId, null, json(Map.of("role", authorType.name())));
             String roleName = authorType == AuthorType.OWNER ? "владельца" : "соавтора";
-            return TelegramResponse.of(TelegramAction.send(chatId, "Отправьте chat_id " + roleName + ".", List.of()));
+            return TelegramResponse.of(TelegramAction.send(
+                    chatId,
+                    "Отправьте Telegram-тег " + roleName + " в формате @username. Пользователь должен сначала запустить бота.",
+                    List.of()
+            ));
         }
         if ("remove".equals(mode)) {
             requireNovelOwner(chatId, novelId);
@@ -551,9 +555,9 @@ public class CommandRouter {
     }
 
     private TelegramResponse sessionAddAuthor(TelegramInboundMessage message, TelegramSession session) {
-        long invitedChatId = parseLong(requireText(message, "chat_id пользователя", 30), "chat_id указан неверно.");
+        String invitedTelegramTag = requireText(message, "Telegram-тег пользователя", 100);
         AuthorType authorType = authorType(payload(session).get("role"));
-        novelService.addAuthor(message.chatId(), session.novelId(), invitedChatId, authorType);
+        novelService.addAuthor(message.chatId(), session.novelId(), invitedTelegramTag, authorType);
         sessionRepository.delete(message.chatId());
         String roleName = authorType == AuthorType.OWNER ? "Владелец добавлен." : "Соавтор добавлен.";
         return TelegramResponse.builder()

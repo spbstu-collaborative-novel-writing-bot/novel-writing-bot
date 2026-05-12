@@ -117,11 +117,12 @@ class CommandRouterTest {
                 .orElseThrow();
         assertThat(flatButtons(edit.keyboard())).anyMatch(button -> "Добавить владельца".equals(button.text()));
 
-        router.route(callback(100, "owner", "Owner", "author:add:" + novel.id() + ":OWNER"));
+        TelegramResponse askTag = router.route(callback(100, "owner", "Owner", "author:add:" + novel.id() + ":OWNER"));
+        assertThat(askTag.actions()).anyMatch(action -> action.text().contains("@username"));
         assertThat(sessionRepository.findByChatId(100)).hasValueSatisfying(session ->
                 assertThat(session.state()).isEqualTo("ADD_AUTHOR"));
 
-        router.route(TelegramInboundMessage.text(100, "owner", "Owner", "200"));
+        router.route(TelegramInboundMessage.text(100, "owner", "Owner", "@owner2"));
 
         assertThat(novelService.listAuthors(100, novel.id())).anySatisfy(author -> {
             assertThat(author.chatId()).isEqualTo(200);
