@@ -61,4 +61,4 @@ gradle clean shadowJar
 java -jar build/libs/app.jar
 ```
 
-Docker Compose запускает три сервиса: приложение, PostgreSQL и RabbitMQ. PostgreSQL использует volume `postgres_data`, поэтому данные сохраняются между перезапусками контейнера.
+Docker Compose запускает три сервиса: само приложение, PostgreSQL и RabbitMQ. PostgreSQL использует volume `postgres_data`, поэтому данные не пропадают при перезапуске контейнера.
