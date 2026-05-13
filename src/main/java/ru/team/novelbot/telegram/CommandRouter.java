@@ -202,11 +202,14 @@ public class CommandRouter {
     private String help() {
         return """
                 Команды:
-                /new - создать роман без сложного синтаксиса
-                /novels - список романов с кнопками
+                /start - начать работать с ботом
+                /new - создать роман
+                /novels - отобразить список романов с кнопками
                 /cancel - отменить текущее действие
+                /request_status - проверить состояние LLM запроса по идентификатору
+                
 
-                Внутри карточек романов и глав используйте кнопки: главы, редактор, .txt, история и LLM.
+                Внутри карточек романов и глав используйте кнопки: главы, редактор, .txt, история, LLM...
                 """;
     }
 
@@ -237,7 +240,7 @@ public class CommandRouter {
     private TelegramResponse sessionNovelTitle(TelegramInboundMessage message) {
         String title = requireText(message, "Название романа", 100);
         sessionRepository.save(message.chatId(), "CREATE_NOVEL_DESCRIPTION", null, null, json(Map.of("title", title)));
-        return TelegramResponse.of(TelegramAction.send(message.chatId(), "Теперь отправьте краткое описание романа.", List.of()));
+        return TelegramResponse.of(TelegramAction.send(message.chatId(), "Отправьте краткое описание романа. Для отмены: /cancel", List.of()));
     }
 
     private TelegramResponse sessionNovelDescription(TelegramInboundMessage message, TelegramSession session) {
@@ -250,7 +253,7 @@ public class CommandRouter {
                 null,
                 json(Map.of("title", payload.get("title"), "description", description))
         );
-        return TelegramResponse.of(TelegramAction.send(message.chatId(), "И последний шаг: отправьте жанр.", List.of()));
+        return TelegramResponse.of(TelegramAction.send(message.chatId(), "Отправьте жанр. Для отмены: /cancel", List.of()));
     }
 
     private TelegramResponse sessionNovelGenre(TelegramInboundMessage message, TelegramSession session) {
