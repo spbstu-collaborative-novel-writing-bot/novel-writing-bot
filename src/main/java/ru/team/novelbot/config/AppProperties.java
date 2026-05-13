@@ -12,6 +12,7 @@ public record AppProperties(
         Database database,
         Rabbit rabbit,
         Llm llm,
+        List<Long> telegramAdminChatIds,
         List<String> projectAuthors
 ) {
     public static AppProperties fromEnv(Map<String, String> env, boolean strict) {
@@ -63,6 +64,7 @@ public record AppProperties(
                         env.getOrDefault("GIGACHAT_CA_CERT_PATH", "").trim(),
                         bool(env.getOrDefault("GIGACHAT_VERIFY_SSL", "true"), "GIGACHAT_VERIFY_SSL")
                 ),
+                parseLongList(env.getOrDefault("TELEGRAM_ADMIN_CHAT_IDS", "")),
                 parseAuthors(env.getOrDefault(
                         "PROJECT_AUTHORS",
                         "Гвоздева Е.,Крутиков Д.,Михайлова А.,Романова А."
@@ -108,6 +110,21 @@ public record AppProperties(
         return Arrays.stream(value.split(","))
                 .map(String::trim)
                 .filter(item -> !item.isBlank())
+                .toList();
+    }
+
+    private static List<Long> parseLongList(String value) {
+        return Arrays.stream(value.split(","))
+                .map(String::trim)
+                .filter(item -> !item.isBlank())
+                .map(item -> {
+                    try {
+                        return Long.parseLong(item);
+                    } catch (NumberFormatException ex) {
+                        throw new IllegalStateException("TELEGRAM_ADMIN_CHAT_IDS must contain comma-separated Telegram chat_id values.", ex);
+                    }
+                })
+                .distinct()
                 .toList();
     }
 

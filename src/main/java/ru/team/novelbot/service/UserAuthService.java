@@ -1,7 +1,9 @@
 package ru.team.novelbot.service;
 
 import org.springframework.stereotype.Service;
+import ru.team.novelbot.config.AppProperties;
 import ru.team.novelbot.domain.AppUser;
+import ru.team.novelbot.domain.UserRole;
 import ru.team.novelbot.repository.UserRepository;
 
 import java.util.List;
@@ -12,14 +14,16 @@ import java.util.regex.Pattern;
 public class UserAuthService {
     private static final Pattern TELEGRAM_USERNAME = Pattern.compile("[A-Za-z0-9_]{5,32}");
 
+    private final AppProperties properties;
     private final UserRepository userRepository;
 
-    public UserAuthService(UserRepository userRepository) {
+    public UserAuthService(AppProperties properties, UserRepository userRepository) {
+        this.properties = properties;
         this.userRepository = userRepository;
     }
 
     public AppUser registerOrUpdate(long chatId, String username, String displayName) {
-        return userRepository.upsert(chatId, emptyToNull(username), emptyToNull(displayName));
+        return userRepository.upsert(chatId, emptyToNull(username), emptyToNull(displayName), roleFor(chatId));
     }
 
     public Optional<AppUser> findByChatId(long chatId) {
@@ -39,6 +43,20 @@ public class UserAuthService {
 
     public List<AppUser> findAll() {
         return userRepository.findAll();
+    }
+
+    public AppUser updateRole(long chatId, UserRole role) {
+        if (role == UserRole.USER && properties.telegramAdminChatIds().contains(chatId)) {
+            throw new UsageException("Р­С‚РѕС‚ Р°РґРјРёРЅ Р·Р°РґР°РЅ РІ TELEGRAM_ADMIN_CHAT_IDS. РЈР±РµСЂРёС‚Рµ chat_id РёР· .env Рё РїРµСЂРµР·Р°РїСѓСЃС‚РёС‚Рµ РїСЂРёР»РѕР¶РµРЅРёРµ.");
+        }
+        if (!userRepository.setRole(chatId, role)) {
+            throw new AppException("РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ РЅРµ РЅР°Р№РґРµРЅ. РћРЅ РґРѕР»Р¶РµРЅ СЃРЅР°С‡Р°Р»Р° РІС‹РїРѕР»РЅРёС‚СЊ /start.");
+        }
+        return requireUser(chatId);
+    }
+
+    private UserRole roleFor(long chatId) {
+        return properties.telegramAdminChatIds().contains(chatId) ? UserRole.ADMIN : UserRole.USER;
     }
 
     private String emptyToNull(String value) {

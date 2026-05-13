@@ -19,6 +19,7 @@ import ru.team.novelbot.domain.ChapterVersionDiff;
 import ru.team.novelbot.domain.LlmRequest;
 import ru.team.novelbot.domain.LlmRequestStatus;
 import ru.team.novelbot.domain.LlmRequestType;
+import ru.team.novelbot.domain.UserRole;
 import ru.team.novelbot.service.AccessDeniedException;
 import ru.team.novelbot.service.AdminNovelDeletionService;
 import ru.team.novelbot.service.AdminStatsService;
@@ -27,6 +28,7 @@ import ru.team.novelbot.service.ChapterService;
 import ru.team.novelbot.service.LlmRequestService;
 import ru.team.novelbot.service.TextTools;
 import ru.team.novelbot.service.UsageException;
+import ru.team.novelbot.service.UserAuthService;
 import ru.team.novelbot.telegram.MiniAppAuthService;
 
 import java.io.IOException;
@@ -51,6 +53,7 @@ public class HttpRoutes {
     private final AdminStatsService adminStatsService;
     private final AdminNovelDeletionService adminNovelDeletionService;
     private final MiniAppAuthService miniAppAuthService;
+    private final UserAuthService userAuthService;
 
     public HttpRoutes(
             AppProperties properties,
@@ -58,7 +61,8 @@ public class HttpRoutes {
             LlmRequestService llmRequestService,
             AdminStatsService adminStatsService,
             AdminNovelDeletionService adminNovelDeletionService,
-            MiniAppAuthService miniAppAuthService
+            MiniAppAuthService miniAppAuthService,
+            UserAuthService userAuthService
     ) {
         this.properties = properties;
         this.chapterService = chapterService;
@@ -66,6 +70,7 @@ public class HttpRoutes {
         this.adminStatsService = adminStatsService;
         this.adminNovelDeletionService = adminNovelDeletionService;
         this.miniAppAuthService = miniAppAuthService;
+        this.userAuthService = userAuthService;
     }
 
     public RouterFunction<ServerResponse> routes() {
@@ -73,6 +78,7 @@ public class HttpRoutes {
                 .andRoute(GET("/admin"), this::adminPanel)
                 .andRoute(GET("/admin/api/overview"), this::adminOverview)
                 .andRoute(GET("/admin/api/users"), this::adminUsers)
+                .andRoute(POST("/admin/api/users/{chatId}/role"), this::adminUpdateUserRole)
                 .andRoute(GET("/admin/api/novels"), this::adminNovels)
                 .andRoute(GET("/admin/api/llm-requests"), this::adminLlmRequests)
                 .andRoute(POST("/admin/api/novels/{novelId}/delete"), this::adminDeleteNovel)
@@ -102,35 +108,64 @@ public class HttpRoutes {
     }
 
     private Mono<ServerResponse> adminOverview(ServerRequest request) {
-        if (!adminTokenValid(request)) {
+        if (!adminAuthorized(request)) {
             return accessDenied();
         }
         return json(adminStatsService.overview());
     }
 
     private Mono<ServerResponse> adminUsers(ServerRequest request) {
-        if (!adminTokenValid(request)) {
+        if (!adminAuthorized(request)) {
             return accessDenied();
         }
         return json(adminStatsService.users());
     }
 
+    private Mono<ServerResponse> adminUpdateUserRole(ServerRequest request) {
+        if (!adminAuthorized(request)) {
+            return accessDenied();
+        }
+        long chatId;
+        try {
+            chatId = pathLong(request, "chatId");
+        } catch (RuntimeException ex) {
+            return error(HttpStatus.BAD_REQUEST, "РќРµРєРѕСЂСЂРµРєС‚РЅС‹Р№ chat_id.");
+        }
+        return request.bodyToMono(Map.class)
+                .defaultIfEmpty(Map.of())
+                .flatMap(body -> {
+                    try {
+                        UserRole role = userRole(value(body, "role"));
+                        var user = userAuthService.updateRole(chatId, role);
+                        return json(Map.of(
+                                "chat_id", user.chatId(),
+                                "role", user.role().name()
+                        ));
+                    } catch (UsageException ex) {
+                        return error(HttpStatus.BAD_REQUEST, ex.getMessage());
+                    } catch (AppException ex) {
+                        return error(HttpStatus.NOT_FOUND, ex.getMessage());
+                    }
+                })
+                .onErrorResume(RuntimeException.class, ex -> error(HttpStatus.BAD_REQUEST, ex.getMessage()));
+    }
+
     private Mono<ServerResponse> adminNovels(ServerRequest request) {
-        if (!adminTokenValid(request)) {
+        if (!adminAuthorized(request)) {
             return accessDenied();
         }
         return json(adminStatsService.novels());
     }
 
     private Mono<ServerResponse> adminLlmRequests(ServerRequest request) {
-        if (!adminTokenValid(request)) {
+        if (!adminAuthorized(request)) {
             return accessDenied();
         }
         return json(adminStatsService.llmRequests());
     }
 
     private Mono<ServerResponse> adminDeleteNovel(ServerRequest request) {
-        if (!adminTokenValid(request)) {
+        if (!adminAuthorized(request)) {
             return accessDenied();
         }
         long novelId;
@@ -398,6 +433,15 @@ public class HttpRoutes {
         };
     }
 
+    private UserRole userRole(String value) {
+        String normalized = value == null ? "" : value.trim().toUpperCase();
+        return switch (normalized) {
+            case "USER" -> UserRole.USER;
+            case "ADMIN" -> UserRole.ADMIN;
+            default -> throw new UsageException("РќРµРєРѕСЂСЂРµРєС‚РЅР°СЏ СЂРѕР»СЊ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ.");
+        };
+    }
+
     private void validateLlmPrompt(String prompt) {
         if (prompt == null || prompt.isBlank()) {
             throw new UsageException("Запрос к LLM не должен быть пустым.");
@@ -509,5 +553,23 @@ public class HttpRoutes {
 
     private boolean adminTokenValid(ServerRequest request) {
         return properties.httpAdminToken().equals(request.headers().firstHeader("X-Admin-Token"));
+    }
+
+    private boolean adminAuthorized(ServerRequest request) {
+        if (adminTokenValid(request)) {
+            return true;
+        }
+        String initData = request.headers().firstHeader("X-Telegram-Init-Data");
+        if (initData == null || initData.isBlank()) {
+            return false;
+        }
+        try {
+            long chatId = miniAppAuthService.requireChatId(initData);
+            return userAuthService.findByChatId(chatId)
+                    .map(user -> user.role() == UserRole.ADMIN)
+                    .orElse(false);
+        } catch (AccessDeniedException ex) {
+            return false;
+        }
     }
 }

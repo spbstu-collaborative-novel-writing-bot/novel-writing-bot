@@ -16,6 +16,7 @@ import ru.team.novelbot.domain.NovelDetails;
 import ru.team.novelbot.domain.NovelStats;
 import ru.team.novelbot.domain.NovelSummary;
 import ru.team.novelbot.domain.TelegramSession;
+import ru.team.novelbot.domain.UserRole;
 import ru.team.novelbot.repository.TelegramSessionRepository;
 import ru.team.novelbot.service.AccessDeniedException;
 import ru.team.novelbot.service.AppException;
@@ -26,6 +27,8 @@ import ru.team.novelbot.service.TextTools;
 import ru.team.novelbot.service.UsageException;
 import ru.team.novelbot.service.UserAuthService;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.format.DateTimeFormatter;
@@ -121,21 +124,22 @@ public class CommandRouter {
             return TelegramResponse.of(TelegramAction.send(
                     message.chatId(),
                     "Пожалуйста, используйте команды и кнопки. Введите /help для краткой справки.",
-                    homeKeyboard()
+                    homeKeyboard(message.chatId())
             ));
         }
 
         ParsedCommand parsed = parse(message.text());
         return switch (parsed.command()) {
-            case "/start" -> TelegramResponse.of(TelegramAction.send(message.chatId(), start(), homeKeyboard()));
-            case "/help" -> TelegramResponse.of(TelegramAction.send(message.chatId(), help(), homeKeyboard()));
+            case "/start" -> TelegramResponse.of(TelegramAction.send(message.chatId(), start(), homeKeyboard(message.chatId())));
+            case "/help" -> TelegramResponse.of(TelegramAction.send(message.chatId(), help(), homeKeyboard(message.chatId())));
             case "/new" -> startNewNovel(message.chatId());
             case "/novels" -> novels(message.chatId(), 0, null);
+            case "/admin" -> adminPanel(message.chatId());
             case "/request_status" -> requestStatus(message.chatId(), parsed.args());
             default -> TelegramResponse.of(TelegramAction.send(
                     message.chatId(),
                     "Команда не распознана. Введите /help для списка основных действий.",
-                    homeKeyboard()
+                    homeKeyboard(message.chatId())
             ));
         };
     }
@@ -204,6 +208,21 @@ public class CommandRouter {
 
                 Внутри карточек романов и глав используйте кнопки: главы, редактор, .txt, история и LLM.
                 """;
+    }
+
+    private TelegramResponse adminPanel(long chatId) {
+        if (!isAdmin(chatId)) {
+            throw new AccessDeniedException("Админ-панель доступна только пользователям с ролью ADMIN.");
+        }
+        String url = adminPanelUrl();
+        if (url == null) {
+            throw new AppException("Для кнопки админ-панели нужно задать TELEGRAM_WEB_APP_URL.");
+        }
+        return TelegramResponse.of(TelegramAction.send(
+                chatId,
+                "Админ-панель откроется в Telegram Mini App и возьмет авторизацию из Telegram.",
+                List.of(List.of(TelegramButton.webApp("Открыть админ-панель", url)))
+        ));
     }
 
     private TelegramResponse startNewNovel(long chatId) {
@@ -684,6 +703,22 @@ public class CommandRouter {
         );
     }
 
+    private List<List<TelegramButton>> homeKeyboard(long chatId) {
+        String adminUrl = adminPanelUrl();
+        if (!isAdmin(chatId) || adminUrl == null) {
+            return homeKeyboard();
+        }
+        var rows = new java.util.ArrayList<>(homeKeyboard());
+        rows.add(List.of(TelegramButton.webApp("Админ-панель", adminUrl)));
+        return List.copyOf(rows);
+    }
+
+    private boolean isAdmin(long chatId) {
+        return userAuthService.findByChatId(chatId)
+                .map(user -> user.role() == UserRole.ADMIN)
+                .orElse(false);
+    }
+
     private List<List<TelegramButton>> novelsKeyboard(List<NovelSummary> novels, int page, int pageCount) {
         var rows = new java.util.ArrayList<List<TelegramButton>>();
         for (NovelSummary novel : novels) {
@@ -769,6 +804,19 @@ public class CommandRouter {
         return view == null || view.isBlank()
                 ? url
                 : url + "&view=" + URLEncoder.encode(view, StandardCharsets.UTF_8);
+    }
+
+    private String adminPanelUrl() {
+        String base = properties.telegramWebAppUrl();
+        if (base == null || base.isBlank()) {
+            return null;
+        }
+        try {
+            URI uri = URI.create(base);
+            return new URI(uri.getScheme(), uri.getAuthority(), "/admin", null, null).toString();
+        } catch (IllegalArgumentException | URISyntaxException ex) {
+            return null;
+        }
     }
 
     private String accepted(LlmRequest request) {

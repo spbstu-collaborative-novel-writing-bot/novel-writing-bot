@@ -16,6 +16,7 @@
     input, button { font: inherit; border-radius: 8px; border: 1px solid #b9c7d1; padding: 9px 11px; }
     input { min-width: min(420px, 100%); flex: 1; }
     button { background: #1f6feb; color: white; border-color: #1f6feb; cursor: pointer; }
+    button.secondary { background: #425466; border-color: #425466; }
     button.danger { background: #c62828; border-color: #c62828; }
     .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
     .metric { border: 1px solid #d9e2e7; border-radius: 8px; padding: 12px; background: #fbfcfd; }
@@ -52,13 +53,31 @@
     <div class="scroll" id="llm"></div>
   </section>
 </main>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <script>
   const token = document.getElementById('token');
+  const loadButton = document.getElementById('load');
   const statusEl = document.getElementById('status');
+  const telegramApp = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+  const telegramInitData = telegramApp && telegramApp.initData ? telegramApp.initData : '';
+  if (telegramApp) {
+    telegramApp.ready();
+    telegramApp.expand();
+  }
   const saved = localStorage.getItem('adminToken');
-  if (saved) token.value = saved;
+  if (telegramInitData) {
+    token.hidden = true;
+    token.disabled = true;
+    token.removeAttribute('placeholder');
+    statusEl.textContent = 'Telegram admin session';
+  } else if (saved) {
+    token.value = saved;
+  }
 
   function headers() {
+    if (telegramInitData) {
+      return {'X-Telegram-Init-Data': telegramInitData};
+    }
     return {'X-Admin-Token': token.value.trim()};
   }
 
@@ -75,6 +94,7 @@
   function renderOverview(data) {
     document.getElementById('overview').innerHTML = [
       metric('Пользователи', data.users),
+      metric('Админы', data.admins),
       metric('Романы', data.novels),
       metric('Главы', data.chapters),
       metric('Участники', data.authors),
@@ -110,6 +130,29 @@
     return `<button class="danger" data-delete-novel="${escapeHtml(row.id)}" data-title="${escapeHtml(row.title)}">Удалить</button>`;
   }
 
+  function userActions(row) {
+    const admin = row.role === 'ADMIN';
+    const nextRole = admin ? 'USER' : 'ADMIN';
+    const label = admin ? 'Сделать USER' : 'Сделать ADMIN';
+    const cls = admin ? 'secondary' : '';
+    return `<button class="${cls}" data-user-role="${nextRole}" data-user-chat-id="${escapeHtml(row.chat_id)}">${label}</button>`;
+  }
+
+  async function changeUserRole(chatId, role) {
+    if (!confirm(`Назначить роль ${role} для chat_id ${chatId}?`)) {
+      return;
+    }
+    statusEl.textContent = 'Обновление роли...';
+    const res = await fetch(`/admin/api/users/${chatId}/role`, {
+      method: 'POST',
+      headers: {...headers(), 'Content-Type': 'application/json'},
+      body: JSON.stringify({role})
+    });
+    if (!res.ok) throw new Error(await res.text());
+    await load();
+    statusEl.textContent = 'Роль обновлена';
+  }
+
   async function deleteNovel(id, title) {
     const reason = prompt(`Причина удаления произведения «${title}»:`);
     if (!reason || !reason.trim()) {
@@ -137,8 +180,17 @@
     });
   }
 
+  function bindUserActions() {
+    document.querySelectorAll('[data-user-role]').forEach(button => {
+      button.addEventListener('click', () => changeUserRole(button.dataset.userChatId, button.dataset.userRole)
+        .catch(e => statusEl.textContent = e.message));
+    });
+  }
+
   async function load() {
-    localStorage.setItem('adminToken', token.value.trim());
+    if (!telegramInitData) {
+      localStorage.setItem('adminToken', token.value.trim());
+    }
     statusEl.textContent = 'Загрузка...';
     const [overview, users, novels, llm] = await Promise.all([
       api('/admin/api/overview'),
@@ -147,14 +199,18 @@
       api('/admin/api/llm-requests')
     ]);
     renderOverview(overview);
-    document.getElementById('users').innerHTML = table(users);
+    document.getElementById('users').innerHTML = table(users, userActions);
     document.getElementById('novels').innerHTML = table(novels, novelActions);
     document.getElementById('llm').innerHTML = table(llm);
+    bindUserActions();
     bindNovelActions();
     statusEl.textContent = 'Обновлено';
   }
 
-  document.getElementById('load').addEventListener('click', () => load().catch(e => statusEl.textContent = e.message));
+  loadButton.addEventListener('click', () => load().catch(e => statusEl.textContent = e.message));
+  if (telegramInitData) {
+    load().catch(e => statusEl.textContent = e.message);
+  }
 </script>
 </body>
 </html>

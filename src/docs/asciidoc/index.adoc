@@ -13,14 +13,15 @@ include::{snippets}/healthcheck/response-fields.adoc[]
 
 == GET /admin
 
-HTML-оболочка панели администратора. Панель запрашивает `X-Admin-Token` в браузере и вызывает защищенные JSON endpoint-ы `/admin/api/*`.
+HTML-оболочка панели администратора. Панель запрашивает `X-Admin-Token` в браузере или использует Telegram Mini App `initData`, когда открыта из команды `/admin`.
 
 == Admin JSON API
 
-Все endpoint-ы требуют заголовок `X-Admin-Token`.
+Все endpoint-ы требуют либо заголовок `X-Admin-Token`, либо `X-Telegram-Init-Data` от Telegram Mini App пользователя с ролью `ADMIN`.
 
 * `GET /admin/api/overview` — агрегированная статистика пользователей, романов, глав, участников и LLM-запросов.
-* `GET /admin/api/users` — пользователи и количество доступных романов.
+* `GET /admin/api/users` — пользователи, системные роли `USER`/`ADMIN` и количество доступных романов.
+* `POST /admin/api/users/{chatId}/role` — назначает пользователю роль `USER` или `ADMIN` без перезапуска приложения.
 * `GET /admin/api/novels` — романы, число авторов, глав и объем текста.
 * `GET /admin/api/llm-requests` — последние LLM-запросы и ошибки.
 * `POST /admin/api/novels/{novelId}/delete` — удаляет произведение после обязательной отправки причины и полного `.txt` всем авторам.
@@ -34,7 +35,13 @@ include::{snippets}/admin-users-success/response-fields.adoc[]
 
 == Mini App LLM API
 
-Все endpoint-ы требуют заголовок `X-Telegram-Init-Data`; подпись и свежесть `auth_date` проверяются сервером.
+Все endpoint-ы Mini App API требуют заголовок `X-Telegram-Init-Data`; подпись и свежесть `auth_date` проверяются сервером.
 
+* `GET /mini/chapter-editor` — HTML WebUI редактора главы.
+* `GET /mini/api/chapters/{novelId}/{chapterId}` — загружает текущую главу.
+* `PUT /mini/api/chapters/{novelId}/{chapterId}` — сохраняет главу с optimistic check по `updated_at`.
+* `GET /mini/api/chapters/{novelId}/{chapterId}/history` — возвращает последние записи истории.
+* `GET /mini/api/chapters/{novelId}/{chapterId}/versions` — возвращает постраничный список версий, включая текущую.
+* `GET /mini/api/chapters/{novelId}/{chapterId}/versions/{versionNumber}/diff` — возвращает word-level diff версии с предыдущей.
 * `POST /mini/api/chapters/{novelId}/{chapterId}/llm` — создает LLM-запрос из Web-редактора.
 * `GET /mini/api/llm/{requestId}` — возвращает статус и результат LLM-запроса.

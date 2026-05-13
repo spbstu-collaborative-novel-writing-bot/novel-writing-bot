@@ -11,7 +11,7 @@
 - `TelegramBotAdapter` получает `message` и `callback_query` updates через Telegram Bot API и выполняет действия роутера: сообщения, редактирование, документы, callback-ответы.
 - `CommandRouter` разбирает команды, callback-кнопки и пошаговые Telegram-сессии.
 - `TelegramClient` инкапсулирует вызовы Telegram Bot API: `sendMessage`, `editMessageText`, `answerCallbackQuery`, `sendDocument`, `getFile`.
-- `UserAuthService` регистрирует пользователя по `chat_id` и обновляет профиль Telegram без системных ролей.
+- `UserAuthService` регистрирует пользователя по `chat_id`, обновляет профиль Telegram и назначает системную роль `USER` или `ADMIN`.
 - `NovelService` управляет произведениями, владельцами и соавторами.
 - `ChapterService` управляет главами, сохраняет историю изменений и поддерживает optimistic update для Mini App редактора.
 - `AccessControlService` проверяет роли `OWNER` и `CO_AUTHOR`.
@@ -28,15 +28,15 @@
 
 Пользователь отправляет команду или нажимает inline-кнопку в Telegram. Адаптер превращает update в `TelegramInboundMessage`, затем `CommandRouter` вызывает нужный сервис и возвращает список Telegram-действий. Сервисы проверяют доступ и работают с репозиториями. Для LLM-действий сервис создает запись в `llm_requests`, публикует сообщение в RabbitMQ, а пользователь получает номер запроса. Worker асинхронно обрабатывает задачу, обновляет статус и отправляет результат или ошибку пользователю.
 
-HTTP-клиент или браузер вызывает `/healthcheck` без авторизации. Для `/admin/api/*` требуется заголовок `X-Admin-Token`; Telegram-роль пользователя для этих endpoint-ов не используется, доступ контролируется HTTP-токеном. Mini App редактор вызывает `/mini/api/chapters/...` и `/mini/api/llm/...` с заголовком `X-Telegram-Init-Data`; сервер проверяет подпись, свежесть `auth_date` и затем применяет обычные права `OWNER`/`CO_AUTHOR`.
+HTTP-клиент или браузер вызывает `/healthcheck` без авторизации. Для `/admin/api/*` требуется `X-Admin-Token` либо `X-Telegram-Init-Data` от Telegram Mini App пользователя с ролью `ADMIN`; список пользователей в админке показывает системную роль из `app_users.role` и позволяет назначать `ADMIN`/`USER` без перезапуска приложения. Mini App редактор вызывает `/mini/api/chapters/...` и `/mini/api/llm/...` с заголовком `X-Telegram-Init-Data`; сервер проверяет подпись, свежесть `auth_date` и затем применяет обычные права `OWNER`/`CO_AUTHOR`.
 
 ## Структура данных
 
 ```text
-app_users(chat_id, username, display_name, created_at)
+app_users(chat_id, username, display_name, role, created_at)
 novels(id, title, description, genre, owner_chat_id, created_at, updated_at)
 novel_authors(novel_id, chat_id, author_type)
-chapters(id, novel_id, title, text, order_number, created_at, updated_at, last_editor_chat_id)
+chapters(id, novel_id, title, text, order_number, created_at, updated_at, created_by_chat_id, last_editor_chat_id)
 chapter_history(id, chapter_id, old_title, old_text, editor_chat_id, changed_at)
 llm_requests(id, chat_id, novel_id, chapter_id, request_type, status, prompt, result, error_message, created_at, updated_at, provider, model, completed_at)
 telegram_sessions(chat_id, state, novel_id, chapter_id, payload, updated_at)

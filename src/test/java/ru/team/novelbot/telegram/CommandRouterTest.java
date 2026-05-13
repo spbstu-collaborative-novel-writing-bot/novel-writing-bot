@@ -48,7 +48,7 @@ class CommandRouterTest {
         LlmRequestRepository llmRequestRepository = new LlmRequestRepository(jdbcTemplate);
         sessionRepository = new TelegramSessionRepository(jdbcTemplate);
         AccessControlService accessControlService = new AccessControlService(novelRepository);
-        userAuthService = new UserAuthService(userRepository);
+        userAuthService = new UserAuthService(properties, userRepository);
         TransactionTemplate tx = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         chapterService = new ChapterService(chapterRepository, novelRepository, userRepository, accessControlService, tx);
         novelService = new NovelService(novelRepository, chapterRepository, userAuthService, accessControlService, tx);
@@ -102,6 +102,24 @@ class CommandRouterTest {
                 .orElseThrow();
         assertThat(flatButtons(edit.keyboard())).anyMatch(button ->
                 button.webAppUrl() != null && button.webAppUrl().contains("novelId=" + novel.id()));
+    }
+
+    @Test
+    void adminCommandSendsAdminPanelWebAppButtonForAdmin() {
+        TelegramResponse response = router.route(TelegramInboundMessage.text(100, "admin", "Admin", "/admin"));
+
+        TelegramAction action = response.actions().getFirst();
+        assertThat(action.text()).contains("Админ-панель");
+        assertThat(flatButtons(action.keyboard())).anyMatch(button ->
+                "https://example.com/admin".equals(button.webAppUrl()));
+    }
+
+    @Test
+    void adminCommandRejectsRegularUser() {
+        TelegramResponse response = router.route(TelegramInboundMessage.text(200, "writer", "Writer", "/admin"));
+
+        assertThat(response.actions().getFirst().text()).contains("ADMIN");
+        assertThat(response.actions().getFirst().keyboard()).isEmpty();
     }
 
     @Test
@@ -183,6 +201,7 @@ class CommandRouterTest {
                 new AppProperties.Database("localhost", 5432, "novelbot", "user", "password"),
                 new AppProperties.Rabbit("localhost", 5672, "guest", "guest", "llm.requests"),
                 new AppProperties.Llm("OPENAI_COMPATIBLE", "llm-key", "http://localhost/llm", "test-model", "", "GIGACHAT_API_PERS", "http://localhost/oauth", "", true),
+                List.of(100L),
                 List.of("Гвоздева Е.", "Крутиков Д.", "Михайлова А.", "Романова А.")
         );
     }

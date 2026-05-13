@@ -10,6 +10,7 @@ import ru.team.novelbot.config.AppProperties;
 import ru.team.novelbot.db.DatabaseInitializer;
 import ru.team.novelbot.domain.AuthorType;
 import ru.team.novelbot.domain.LlmRequestStatus;
+import ru.team.novelbot.domain.UserRole;
 import ru.team.novelbot.rabbit.LlmTask;
 import ru.team.novelbot.rabbit.LlmTaskPublisher;
 import ru.team.novelbot.repository.ChapterRepository;
@@ -45,7 +46,7 @@ class ServiceIntegrationTest {
         ChapterRepository chapterRepository = new ChapterRepository(jdbcTemplate);
         LlmRequestRepository llmRequestRepository = new LlmRequestRepository(jdbcTemplate);
         AccessControlService accessControlService = new AccessControlService(novelRepository);
-        userAuthService = new UserAuthService(userRepository);
+        userAuthService = new UserAuthService(properties, userRepository);
         chapterService = new ChapterService(chapterRepository, novelRepository, userRepository, accessControlService, transactionTemplate);
         novelService = new NovelService(novelRepository, chapterRepository, userAuthService, accessControlService, transactionTemplate);
         publishedTasks = new ArrayList<>();
@@ -67,6 +68,41 @@ class ServiceIntegrationTest {
 
         assertThat(userAuthService.findAll()).hasSize(1);
         assertThat(userAuthService.requireUser(100).username()).isEqualTo("writer_new");
+        assertThat(userAuthService.requireUser(100).role()).isEqualTo(UserRole.USER);
+    }
+
+    @Test
+    void assignsAdminRoleFromConfiguredTelegramChatIds() {
+        AppProperties properties = new AppProperties(
+                "telegram-token",
+                "",
+                "secret",
+                8080,
+                new AppProperties.Database("localhost", 5432, "novelbot", "user", "password"),
+                new AppProperties.Rabbit("localhost", 5672, "guest", "guest", "llm.requests"),
+                new AppProperties.Llm("OPENAI_COMPATIBLE", "llm-key", "http://localhost/llm", "test-model", "", "GIGACHAT_API_PERS", "http://localhost/oauth", "", true),
+                List.of(100L),
+                List.of("author")
+        );
+        DataSource dataSource = dataSource();
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
+        new DatabaseInitializer(jdbcTemplate).initialize();
+        UserAuthService authService = new UserAuthService(properties, new UserRepository(jdbcTemplate));
+
+        var user = authService.registerOrUpdate(100, "admin", "Admin");
+
+        assertThat(user.role()).isEqualTo(UserRole.ADMIN);
+    }
+
+    @Test
+    void roleAssignedInDatabaseSurvivesNextTelegramProfileUpdate() {
+        userAuthService.registerOrUpdate(100, "writer", "Writer");
+        userAuthService.updateRole(100, UserRole.ADMIN);
+
+        var user = userAuthService.registerOrUpdate(100, "writer_new", "Writer New");
+
+        assertThat(user.role()).isEqualTo(UserRole.ADMIN);
+        assertThat(user.username()).isEqualTo("writer_new");
     }
 
     @Test
@@ -287,6 +323,7 @@ class ServiceIntegrationTest {
                 new AppProperties.Database("localhost", 5432, "novelbot", "user", "password"),
                 new AppProperties.Rabbit("localhost", 5672, "guest", "guest", "llm.requests"),
                 new AppProperties.Llm("OPENAI_COMPATIBLE", "llm-key", "http://localhost/llm", "test-model", "", "GIGACHAT_API_PERS", "http://localhost/oauth", "", true),
+                List.of(),
                 List.of("Гвоздева Е.", "Крутиков Д.", "Михайлова А.", "Романова А.")
         );
     }

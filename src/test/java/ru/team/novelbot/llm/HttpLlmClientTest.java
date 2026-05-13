@@ -84,6 +84,7 @@ class HttpLlmClientTest {
                         "",
                         true
                 ),
+                List.of(),
                 List.of("Гвоздева Е.")
         );
 
@@ -153,6 +154,7 @@ class HttpLlmClientTest {
                         "",
                         true
                 ),
+                List.of(),
                 List.of("Гвоздева Е.")
         );
 
@@ -217,6 +219,7 @@ class HttpLlmClientTest {
                         "",
                         true
                 ),
+                List.of(),
                 List.of("author")
         );
 

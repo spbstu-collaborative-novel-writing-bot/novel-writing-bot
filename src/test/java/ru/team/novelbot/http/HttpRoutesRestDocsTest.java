@@ -71,7 +71,7 @@ class HttpRoutesRestDocsTest {
         ChapterRepository chapterRepository = new ChapterRepository(jdbcTemplate);
         LlmRequestRepository llmRequestRepository = new LlmRequestRepository(jdbcTemplate);
         AccessControlService accessControlService = new AccessControlService(novelRepository);
-        userAuthService = new UserAuthService(userRepository);
+        userAuthService = new UserAuthService(properties, userRepository);
         telegramClient = new RecordingTelegramClient(properties, objectMapper);
         chapterService = new ChapterService(
                 chapterRepository,
@@ -102,7 +102,8 @@ class HttpRoutesRestDocsTest {
                 llmRequestService,
                 new AdminStatsService(jdbcTemplate),
                 new AdminNovelDeletionService(novelRepository, chapterRepository, telegramClient),
-                new MiniAppAuthService(properties, objectMapper)
+                new MiniAppAuthService(properties, objectMapper),
+                userAuthService
         );
         webTestClient = WebTestClient.bindToRouterFunction(routes.routes())
                 .configureClient()
@@ -145,6 +146,7 @@ class HttpRoutesRestDocsTest {
                                 fieldWithPath("[].chat_id").description("Telegram chat_id пользователя."),
                                 fieldWithPath("[].username").description("Username Telegram, если доступен."),
                                 fieldWithPath("[].display_name").description("Отображаемое имя пользователя."),
+                                fieldWithPath("[].role").description("System user role: USER or ADMIN."),
                                 fieldWithPath("[].created_at").description("Дата и время регистрации."),
                                 fieldWithPath("[].accessible_novels").description("Количество доступных произведений."),
                                 fieldWithPath("[].owned_novels").description("Количество произведений, где пользователь владелец.")
@@ -195,8 +197,49 @@ class HttpRoutesRestDocsTest {
                 .expectStatus().isOk()
                 .expectBody(String.class)
                 .consumeWith(result -> assertThat(result.getResponseBody())
-                        .contains("\"users\":1", "\"novels\":1")
-                        .doesNotContain("\"admins\""));
+                        .contains("\"users\":1", "\"admins\":0", "\"novels\":1"));
+    }
+
+    @Test
+    void acceptsTelegramAdminInitDataForAdminApiWithoutToken() throws Exception {
+        userAuthService.registerOrUpdate(999, "admin", "Admin");
+
+        webTestClient.get()
+                .uri("/admin/api/users")
+                .header("X-Telegram-Init-Data", signedInitData(999))
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class)
+                .consumeWith(result -> assertThat(result.getResponseBody())
+                        .contains("\"chat_id\":999", "\"role\":\"ADMIN\""));
+    }
+
+    @Test
+    void adminCanUpdateUserRoleFromAdminApi() {
+        userAuthService.registerOrUpdate(200, "writer", "Writer");
+
+        webTestClient.post()
+                .uri("/admin/api/users/{chatId}/role", 200)
+                .header("X-Admin-Token", "secret")
+                .bodyValue(Map.of("role", "ADMIN"))
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class)
+                .consumeWith(result -> assertThat(result.getResponseBody())
+                        .contains("\"chat_id\":200", "\"role\":\"ADMIN\""));
+
+        assertThat(userAuthService.requireUser(200).role().name()).isEqualTo("ADMIN");
+    }
+
+    @Test
+    void rejectsTelegramNonAdminInitDataForAdminApi() throws Exception {
+        userAuthService.registerOrUpdate(100, "writer", "Writer");
+
+        webTestClient.get()
+                .uri("/admin/api/users")
+                .header("X-Telegram-Init-Data", signedInitData(100))
+                .exchange()
+                .expectStatus().isForbidden();
     }
 
     @Test
@@ -408,6 +451,7 @@ class HttpRoutesRestDocsTest {
                 new AppProperties.Database("localhost", 5432, "novelbot", "user", "password"),
                 new AppProperties.Rabbit("localhost", 5672, "guest", "guest", "llm.requests"),
                 new AppProperties.Llm("OPENAI_COMPATIBLE", "llm-key", "http://localhost/llm", "test-model", "", "GIGACHAT_API_PERS", "http://localhost/oauth", "", true),
+                List.of(999L),
                 List.of("Гвоздева Е.", "Крутиков Д.", "Михайлова А.", "Романова А.")
         );
     }

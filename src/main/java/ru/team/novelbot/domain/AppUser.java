@@ -6,6 +6,7 @@ public record AppUser(
         long chatId,
         String username,
         String displayName,
+        UserRole role,
         LocalDateTime createdAt
 ) {
 }
